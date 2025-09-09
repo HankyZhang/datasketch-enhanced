@@ -11,8 +11,14 @@ from os import path
 here = path.abspath(path.dirname(__file__))
 
 # Get the long description from the relevant file
-with open(path.join(here, 'README.rst'), encoding='utf-8') as f:
-    long_description = f.read()
+try:
+    with open(path.join(here, 'README.md'), encoding='utf-8') as f:
+        long_description = f.read()
+        long_description_content_type = 'text/markdown'
+except FileNotFoundError:
+    with open(path.join(here, 'README.rst'), encoding='utf-8') as f:
+        long_description = f.read()
+        long_description_content_type = 'text/x-rst'
 
 # Get the code version
 version = {}
@@ -22,16 +28,18 @@ __version__ = version['__version__']
 # now we have a `__version__` variable
 
 setup(
-    name='datasketch',
+    name='datasketch-enhanced',
     version=__version__,
-    description='Probabilistic data structures for processing and searching very large datasets',
+    description='Enhanced datasketch with comprehensive Chinese documentation and comments',
     long_description=long_description,
-    url='https://ekzhu.github.io/datasketch',
+    long_description_content_type=long_description_content_type,
+    url='https://github.com/HankyZhang/datasketch-enhanced',
     project_urls={
-        'Source': 'https://github.com/ekzhu/datasketch',
+        'Source': 'https://github.com/HankyZhang/datasketch-enhanced',
+        'Original': 'https://github.com/ekzhu/datasketch',
     },
-    author='ekzhu',
-    author_email='ekzhu@cs.toronto.edu',
+    author='HankyZhang (Enhanced Version)',
+    author_email='your.email@example.com',
     license='MIT',
     classifiers=[
         'Development Status :: 5 - Production/Stable',
