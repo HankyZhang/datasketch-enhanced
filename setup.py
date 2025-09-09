@@ -28,9 +28,9 @@ __version__ = version['__version__']
 # now we have a `__version__` variable
 
 setup(
-    name='datasketch-enhanced',
+    name='hnsw-enhanced',
     version=__version__,
-    description='Enhanced datasketch with comprehensive Chinese documentation and comments',
+    description='HNSW algorithm implementation with comprehensive Chinese documentation',
     long_description=long_description,
     long_description_content_type=long_description_content_type,
     url='https://github.com/HankyZhang/datasketch-enhanced',
@@ -53,43 +53,19 @@ setup(
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
     ],
-    keywords='database datamining',
+    keywords='hnsw similarity-search machine-learning chinese-docs',
     packages=find_packages(include=['datasketch*']),
     install_requires=[
         'numpy>=1.11',
-        'scipy>=1.0.0',
     ],
     extras_require={
-        'cassandra': [
-            'cassandra-driver>=3.20',
-        ],
-        'redis': [
-            'redis>=2.10.0',
-        ],
         'benchmark': [
-            'pyhash>=0.9.3',
             'matplotlib>=3.1.2',
             'scikit-learn>=0.21.3',
-            'scipy>=1.3.3',
             'pandas>=0.25.3',
-            'SetSimilaritySearch>=0.1.7',
-            'pyfarmhash>=0.2.2',
-            'nltk>=3.4.5',
         ],
         'test': [
-            'cassandra-driver>=3.20',
-            'redis>=2.10.0',
-            'mock>=2.0.0',
-            'mockredispy',
-            'coverage',
-            'pymongo>=3.9.0',
-            'nose>=1.3.7',
-            'nose-exclude>=0.5.0',
             'pytest',
-        ],
-        'experimental_aio': [
-            "aiounittest ; python_version>='3.6'",
-            "motor ; python_version>='3.6'",
         ],
     },
 )
