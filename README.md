@@ -8,6 +8,15 @@
 
 我们刚刚完成了 **HNSW Hybrid 两阶段检索系统** 的完整实现！这是一个革命性的改进，按照详细的项目行动指南，将标准HNSW转换为高性能的两阶段检索架构。
 
+## 📌 实现说明
+
+**此Hybrid系统实现是基于详细项目行动指南的完整新实现**，包含以下核心文件：
+- `complete_hybrid_evaluation.py` - 主要综合评估器（5个完整阶段）
+- `hnsw_hybrid_evaluation.py` - 核心Hybrid HNSW索引实现
+- `test_basic_functionality.py` - 阶段化测试验证
+- `test_quick_hybrid.py` - 快速验证工具
+- `final_demo.py` - 完整系统演示
+
 ### ✅ 项目完成状态：100% 完成
 
 **🏆 全部5个阶段已完成实现：**
@@ -254,9 +263,8 @@ hybrid_index = HybridHNSWIndex(distance_func=cosine_distance)
 ```
 datasketch-enhanced/
 ├── 🏗️ 核心实现文件
-│   ├── complete_hybrid_evaluation.py    # 完整的综合评估器
+│   ├── complete_hybrid_evaluation.py    # 完整的综合评估器（主要实现）
 │   ├── hnsw_hybrid_evaluation.py        # 核心Hybrid HNSW实现
-│   ├── hnsw_hybrid.py                   # Hybrid工具函数
 │   └── datasketch/
 │       ├── __init__.py
 │       ├── hnsw.py                      # 基础HNSW实现
@@ -270,8 +278,7 @@ datasketch-enhanced/
 │       └── test_hnsw.py                 # HNSW单元测试
 ├── ⚙️ 实验与调优
 │   ├── experiment_runner.py            # 实验管理器
-│   ├── parameter_tuning.py             # 参数优化
-│   └── debug_hybrid.py                 # 调试工具
+│   └── parameter_tuning.py             # 参数优化
 ├── 📚 完整文档
 │   ├── PROJECT_COMPLETION_REPORT.md    # 项目完成报告
 │   ├── HNSW_HYBRID_README.md          # Hybrid系统详细说明
@@ -504,7 +511,8 @@ def semantic_search(query_embedding, k=10):
 | [HNSW_代码分析_中文版.md](./HNSW_代码分析_中文版.md) | 代码结构的详细中文分析 |
 | [examples/hnsw_examples.py](./examples/hnsw_examples.py) | 完整的使用示例和最佳实践 |
 | **🆕 [HNSW_HYBRID_README.md](./HNSW_HYBRID_README.md)** | **Hybrid两阶段检索系统完整文档** |
-| **🆕 [hnsw_hybrid.py](./hnsw_hybrid.py)** | **Hybrid系统核心实现代码** |
+| **🆕 [complete_hybrid_evaluation.py](./complete_hybrid_evaluation.py)** | **Hybrid系统核心实现代码** |
+| **🆕 [hnsw_hybrid_evaluation.py](./hnsw_hybrid_evaluation.py)** | **Hybrid索引和评估核心实现** |
 | **🆕 [experiment_runner.py](./experiment_runner.py)** | **大规模实验运行脚本** |
 | **🆕 [parameter_tuning.py](./parameter_tuning.py)** | **参数调优和分析工具** |
 
