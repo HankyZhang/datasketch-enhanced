@@ -48,6 +48,19 @@ coverage.xml
 
 # Translations
 *.mo
+
+# Large dataset files
+*.tar.gz
+*.fvecs
+*.ivecs
+sift/
+datasets/
+
+# Result files  
+evaluation_results/
+quick_test_results/
+medium_test_results/
+*.pkl
 *.pot
 
 # Django stuff:
