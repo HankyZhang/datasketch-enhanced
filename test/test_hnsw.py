@@ -2,6 +2,8 @@ import unittest
 import warnings
 import sys
 import os
+import time
+from typing import List, Tuple, Dict, Any
 
 import numpy as np
 
@@ -273,6 +275,248 @@ class TestHNSW(unittest.TestCase):
         self.assertRaises(KeyError, hnsw.__getitem__, 0)
         self.assertRaises(KeyError, hnsw.popitem)
         self.assertRaises(ValueError, hnsw.query, data[0])
+
+
+class TestHNSWRecall(unittest.TestCase):
+    """Test class specifically for measuring baseline HNSW recall performance."""
+    
+    def setUp(self):
+        """Set up test data for recall testing."""
+        np.random.seed(42)  # For reproducible results
+        
+    def _compute_ground_truth(self, dataset: np.ndarray, queries: np.ndarray, k: int) -> Dict[int, List[int]]:
+        """Compute ground truth using brute force search."""
+        ground_truth = {}
+        
+        for query_idx, query_vector in enumerate(queries):
+            distances = []
+            for data_idx, data_vector in enumerate(dataset):
+                dist = l2_distance(query_vector, data_vector)
+                distances.append((data_idx, dist))
+            
+            # Sort by distance and take top k
+            distances.sort(key=lambda x: x[1])
+            ground_truth[query_idx] = [idx for idx, _ in distances[:k]]
+            
+        return ground_truth
+    
+    def _calculate_recall(self, hnsw_results: List[int], ground_truth: List[int]) -> float:
+        """Calculate recall between HNSW results and ground truth."""
+        if not ground_truth:
+            return 0.0
+        
+        hnsw_set = set(hnsw_results)
+        gt_set = set(ground_truth)
+        
+        intersection = hnsw_set.intersection(gt_set)
+        return len(intersection) / len(gt_set)
+    
+    def test_baseline_hnsw_recall_small(self):
+        """Test baseline HNSW recall on a small dataset."""
+        # Create test dataset
+        n_data = 1000
+        n_queries = 50
+        dim = 64
+        k = 10
+        
+        # Generate data
+        dataset = np.random.random((n_data, dim)).astype(np.float32)
+        query_indices = np.random.choice(n_data, n_queries, replace=False)
+        queries = dataset[query_indices]
+        
+        # Remove query points from dataset to avoid trivial matches
+        data_mask = np.ones(n_data, dtype=bool)
+        data_mask[query_indices] = False
+        filtered_dataset = dataset[data_mask]
+        filtered_indices = np.arange(n_data)[data_mask]
+        
+        print(f"\n📊 Testing Baseline HNSW Recall:")
+        print(f"   Dataset size: {len(filtered_dataset)}")
+        print(f"   Query count: {n_queries}")
+        print(f"   Vector dimension: {dim}")
+        print(f"   k: {k}")
+        
+        # Compute ground truth
+        print("   Computing ground truth...")
+        start_time = time.time()
+        ground_truth = {}
+        for query_idx, query_vector in enumerate(queries):
+            distances = []
+            for data_idx, data_vector in enumerate(filtered_dataset):
+                dist = l2_distance(query_vector, data_vector)
+                distances.append((filtered_indices[data_idx], dist))
+            
+            distances.sort(key=lambda x: x[1])
+            ground_truth[query_idx] = [idx for idx, _ in distances[:k]]
+        
+        gt_time = time.time() - start_time
+        print(f"   Ground truth computed in {gt_time:.2f}s")
+        
+        # Test different HNSW configurations
+        test_configs = [
+            {'m': 8, 'ef_construction': 100, 'ef_search': 50},
+            {'m': 16, 'ef_construction': 200, 'ef_search': 100},
+            {'m': 32, 'ef_construction': 400, 'ef_search': 200},
+        ]
+        
+        results = []
+        
+        for config in test_configs:
+            print(f"\n   Testing: m={config['m']}, ef_construction={config['ef_construction']}, ef_search={config['ef_search']}")
+            
+            # Build HNSW index
+            start_time = time.time()
+            hnsw = HNSW(
+                distance_func=l2_distance,
+                m=config['m'],
+                ef_construction=config['ef_construction']
+            )
+            
+            # Insert data points
+            for idx, vector in zip(filtered_indices, filtered_dataset):
+                hnsw.insert(idx, vector)
+            
+            build_time = time.time() - start_time
+            print(f"     Build time: {build_time:.2f}s")
+            
+            # Test queries
+            start_time = time.time()
+            recalls = []
+            
+            for query_idx, query_vector in enumerate(queries):
+                # Get HNSW results
+                hnsw_results = hnsw.query(query_vector, k=k, ef=config['ef_search'])
+                hnsw_ids = [result_id for result_id, _ in hnsw_results]
+                
+                # Calculate recall
+                recall = self._calculate_recall(hnsw_ids, ground_truth[query_idx])
+                recalls.append(recall)
+            
+            query_time = time.time() - start_time
+            avg_recall = np.mean(recalls)
+            avg_query_time = query_time / n_queries
+            
+            result = {
+                'config': config,
+                'recall@k': avg_recall,
+                'avg_query_time': avg_query_time,
+                'build_time': build_time,
+                'std_recall': np.std(recalls)
+            }
+            results.append(result)
+            
+            print(f"     Recall@{k}: {avg_recall:.4f} ± {np.std(recalls):.4f}")
+            print(f"     Avg query time: {avg_query_time*1000:.2f}ms")
+            
+            # Basic assertion - recall should be reasonable
+            self.assertGreater(avg_recall, 0.1, f"Recall too low: {avg_recall:.4f}")
+            self.assertLess(avg_query_time, 1.0, f"Query time too slow: {avg_query_time:.4f}s")
+        
+        # Find best configuration
+        best_result = max(results, key=lambda x: x['recall@k'])
+        print(f"\n   🏆 Best configuration:")
+        print(f"     Config: {best_result['config']}")
+        print(f"     Recall@{k}: {best_result['recall@k']:.4f}")
+        print(f"     Query time: {best_result['avg_query_time']*1000:.2f}ms")
+        
+        # Store results for potential comparison
+        self.baseline_recall_results = results
+        
+        return results
+    
+    def test_baseline_hnsw_recall_medium(self):
+        """Test baseline HNSW recall on a medium dataset."""
+        # Create test dataset
+        n_data = 5000
+        n_queries = 100
+        dim = 128
+        k = 10
+        
+        # Generate data
+        dataset = np.random.random((n_data, dim)).astype(np.float32)
+        query_indices = np.random.choice(n_data, n_queries, replace=False)
+        queries = dataset[query_indices]
+        
+        # Remove query points from dataset
+        data_mask = np.ones(n_data, dtype=bool)
+        data_mask[query_indices] = False
+        filtered_dataset = dataset[data_mask]
+        filtered_indices = np.arange(n_data)[data_mask]
+        
+        print(f"\n📊 Testing Baseline HNSW Recall (Medium Dataset):")
+        print(f"   Dataset size: {len(filtered_dataset)}")
+        print(f"   Query count: {n_queries}")
+        print(f"   Vector dimension: {dim}")
+        print(f"   k: {k}")
+        
+        # Use optimized configuration
+        config = {'m': 16, 'ef_construction': 200, 'ef_search': 100}
+        
+        # Build HNSW index
+        print("   Building HNSW index...")
+        start_time = time.time()
+        hnsw = HNSW(
+            distance_func=l2_distance,
+            m=config['m'],
+            ef_construction=config['ef_construction']
+        )
+        
+        for idx, vector in zip(filtered_indices, filtered_dataset):
+            hnsw.insert(idx, vector)
+        
+        build_time = time.time() - start_time
+        print(f"   Build time: {build_time:.2f}s")
+        
+        # Sample ground truth computation (for performance)
+        print("   Computing sample ground truth...")
+        sample_size = min(20, n_queries)
+        sample_queries = queries[:sample_size]
+        
+        start_time = time.time()
+        ground_truth = {}
+        for query_idx, query_vector in enumerate(sample_queries):
+            distances = []
+            for data_idx, data_vector in enumerate(filtered_dataset):
+                dist = l2_distance(query_vector, data_vector)
+                distances.append((filtered_indices[data_idx], dist))
+            
+            distances.sort(key=lambda x: x[1])
+            ground_truth[query_idx] = [idx for idx, _ in distances[:k]]
+        
+        gt_time = time.time() - start_time
+        print(f"   Ground truth computed in {gt_time:.2f}s")
+        
+        # Test HNSW queries
+        start_time = time.time()
+        recalls = []
+        
+        for query_idx, query_vector in enumerate(sample_queries):
+            hnsw_results = hnsw.query(query_vector, k=k, ef=config['ef_search'])
+            hnsw_ids = [result_id for result_id, _ in hnsw_results]
+            
+            recall = self._calculate_recall(hnsw_ids, ground_truth[query_idx])
+            recalls.append(recall)
+        
+        query_time = time.time() - start_time
+        avg_recall = np.mean(recalls)
+        avg_query_time = query_time / sample_size
+        
+        print(f"   Results:")
+        print(f"     Recall@{k}: {avg_recall:.4f} ± {np.std(recalls):.4f}")
+        print(f"     Avg query time: {avg_query_time*1000:.2f}ms")
+        print(f"     Total queries tested: {sample_size}")
+        
+        # Assertions
+        self.assertGreater(avg_recall, 0.15, f"Recall too low for medium dataset: {avg_recall:.4f}")
+        self.assertLess(avg_query_time, 0.1, f"Query time too slow for medium dataset: {avg_query_time:.4f}s")
+        
+        return {
+            'dataset_size': len(filtered_dataset),
+            'recall@k': avg_recall,
+            'avg_query_time': avg_query_time,
+            'build_time': build_time,
+            'config': config
+        }
 
 
 class TestHNSWLayerWithReversedEdges(TestHNSW):
