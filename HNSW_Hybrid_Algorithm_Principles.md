@@ -1,297 +1,186 @@
-# HNSW Hybrid Two-Stage Retrieval System - Algorithm Principles
+# HNSW Hybrid Two-Stage Retrieval System - Algorithm Principles (Updated)
 
-## 算法概述
+> 本文档已更新，反映当前 `HybridHNSIndex` / `HybridHNSWIndex` 实际实现中新加入的：父→子映射双模式 (approx / brute)、Diversification（多样化限制）、Repair（覆盖修复）以及 Overlap 重叠统计指标。原始“原则”版本保留核心思想，这里补充准确的运行机理与约束分析。
 
-HNSW Hybrid 两阶段检索系统是对标准HNSW算法的创新性改进，通过将单阶段搜索分解为两个独立的阶段，显著提升了召回性能。该系统特别适用于需要高召回率的应用场景，如推荐系统、图像检索和语义搜索。
+## 1. 总体概念回顾
 
-## 核心设计理念
-
-### 1. 两阶段架构设计
-
-传统HNSW算法采用单阶段搜索策略，直接从入口点开始，通过多层图的导航找到最近邻。而Hybrid系统将搜索过程分解为：
-
-- **第一阶段（粗过滤）**: 在父节点层进行快速区域定位
-- **第二阶段（精过滤）**: 在选定区域的子节点中进行精确搜索
-
-这种设计理念基于以下观察：
-1. 高维向量空间中，相似向量往往聚集在特定区域
-2. 通过预计算的父-子映射，可以显著减少搜索空间
-3. 两阶段搜索可以平衡搜索精度和计算效率
-
-### 2. 父-子层次结构
-
-Hybrid系统从标准HNSW的多层结构中提取特定层级的节点作为"父节点"，这些父节点充当聚类中心的作用：
+两阶段 (Parent → Children) 结构的目标：用一个小得多的父集合做“粗定位”，再在合并后的子候选集合中做“精排序”，以降低在线距离计算次数。然而实践中**有效候选独立覆盖度**往往成为瓶颈：若父列表高度重叠，理论候选上限 `n_probe * k_children` 被显著压缩，召回率受限。因此最新实现加入结构性控制与诊断指标。
 
 ```
-标准HNSW结构:           Hybrid系统结构:
-Level 3: [A]            Parent Layer: [A, B, C]
-Level 2: [A, B, C]      Child Layer:  [A的子节点, B的子节点, C的子节点]
-Level 1: [A, B, C, D]   
-Level 0: [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]
+Raw Theoretical Candidate Upper Bound:  n_probe * k_children
+Effective Unique Candidates:            |Union_{p in ProbedParents} ChildList(p)|
+```
+我们关注的核心是：`Effective Unique Candidates / (n_probe * k_children)` 的折损原因：
+1. 少量“密集”点反复出现（高 assignment count）
+2. 父节点之间语义位置接近 → 子列表高 Jaccard 重叠
+3. 部分长尾点完全未进入任何父列表 → 覆盖缺口 (coverage gap)
+
+## 2. 架构与数据流
+
+| 阶段 | 输入 | 处理 | 关键输出 | 关键参数 |
+|------|------|------|----------|----------|
+| Base Index 构建 | 原始向量全集 | 标准 HNSW 构建 | 多层图 | m, ef_construction |
+| 父节点提取 | HNSW 图 | 选定层节点收集 | 父节点集合 P | parent_level |
+| 父→子映射 | 父节点 + 数据集 | approx 或 brute + (Diversify + Repair) | parent_child_map | k_children, ef, diversify_max_assignments, repair_min_assignments |
+| 查询阶段 Stage1 | 查询向量 q | 向量化父距离 | Top n_probe 父集合 | n_probe |
+| 查询阶段 Stage2 | 父集合 & 映射 | 合并去重 + 批量距离 | Top k 结果 | k |
+| 诊断/统计 | 映射 & 查询日志 | 覆盖 / 重叠 / 分配分布 | stats() 字典 | sample_pairs |
+
+## 3. 父→子映射策略
+
+### 3.1 Approx vs Brute
+
+| 模式 | 流程 | 复杂度 | 适用 |
+|------|------|--------|------|
+| approx | 对父向量执行 HNSW 查询 (ef 控制临时扩展) 取前 k_children+1 | O(P * log N) 近似 | 大数据主用 |
+| brute  | 父向量与全集批量 L2 计算排序取最邻近 | O(P * N) 精确 | 小规模/精确分析 |
+
+### 3.2 Diversification（多样化限制）
+
+问题：若单个数据点在多数父列表出现，unique coverage 降低。
+
+策略：遍历父节点的初始候选序列时：
+```
+accepted = []
+skipped = []
+for cid in raw_child_ids:
+    if len(accepted) == k_children: break
+    if assignment_count[cid] < DIVERSIFY_MAX:   # 尚未超过阈值
+        accept(cid); assignment_count[cid]+=1
+    else:
+        skipped.append(cid)
+回填：若 accepted 不足 k_children，用 skipped 头部补齐
+```
+效果：抑制高频点的“霸占”行为，但可能牺牲局部最优近邻质量，需要与 k_children、n_probe 联动调参。
+
+### 3.3 Repair（覆盖修复）
+
+问题：长尾点可能未进入任何父列表 → 查询无法命中 → 召回上限受限。
+
+策略：统计最终 assignment_count；对出现次数 < R_MIN 的点：计算其到所有父节点的距离，按最近父逐一插入（允许父列表长度溢出 k_children）。
+
+权衡：保证全局最小覆盖，增加少量尾部溢出；可选限制溢出上限（后续可扩展）。
+
+### 3.4 Overlap / Coverage 指标
+
+构建后采样父列表对，计算 Jaccard：
+```
+J(L_i, L_j) = |L_i ∩ L_j| / |L_i ∪ L_j|
+```
+主要输出：
+| 指标 | 含义 | 影响 |
+|------|------|------|
+| overlap_unique_fraction | 至少被一个父列表覆盖的点数 / 全集 | 低 → 召回上限低 |
+| avg_assignment_count | 覆盖点平均出现次数 | 高且 unique_fraction 不升 → 冗余浪费 |
+| multi_coverage_fraction | 出现次数 >1 的点比例 | 评估冗余集中度 |
+| mean/median_jaccard_overlap | 父列表重叠程度 | 高 → 有效候选折损 |
+| max_assignment_count | 单点最大重复次数 | 识别“热点”主导现象 |
+
+### 3.5 有效候选规模与召回上界
+
+设：
+```
+T = n_probe * k_children            # 理论上限
+U = UniqueCandidatesAmongProbed     # 实际去重后
+ρ = U / T                           # 利用率
+```
+在随机均匀分布假设下，召回率随 ρ 增大单调上升；在集中分布时即便增加 n_probe / k_children，如果 overlap 不下降，ρ 仍然受限 → 需要 Diversify。
+
+## 4. 更新后的伪代码
+
+### 4.1 映射构建（含 Diversify + Repair）
+```text
+for each parent p in Parents:
+    raw = QueryChildren(p, mode=approx|brute, want=k_children+1)
+    raw = raw - {p}
+    if diversify_max_assignments is None:
+        child_list = raw[:k_children]; inc counts
+    else:
+        accepted, skipped = [], []
+        for cid in raw:
+            if len(accepted) == k_children: break
+            if assignment_count[cid] < diversify_max: accept(cid); inc
+            else: skipped.append(cid)
+        if len(accepted) < k_children:
+            backfill = skipped[: k_children - len(accepted)]
+            accept all backfill (inc counts)
+        child_list = accepted (+backfill)
+    parent_child_map[p] = child_list
+
+if repair_min_assignments:
+    deficit = {cid | assignment_count[cid] < repair_min}
+    for cid in deficit:
+        need = repair_min - assignment_count[cid]
+        order = sort_parents_by_distance_to(cid)
+        for pid in order while need>0:
+            if cid not in parent_child_map[pid]:
+                parent_child_map[pid].append(cid); inc; need--
 ```
 
-## 算法详细原理
-
-### 阶段1：构建阶段（Construction Phase）
-
-#### 1.1 父节点提取（Parent Node Extraction）
-
-```python
-def _extract_parent_nodes(self) -> List[Hashable]:
-    """从指定HNSW层级提取父节点"""
-    parent_nodes = []
-    target_layer = self.base_index._graphs[self.parent_level]
-    
-    for node_id in target_layer:
-        if node_id in self.base_index and not self.base_index._nodes[node_id].is_deleted:
-            parent_nodes.append(node_id)
-    
-    return parent_nodes
+### 4.2 查询流程
+```text
+parents = TopNProbeParents(q, n_probe)   # 向量化 L2 argpartition
+pool = Union( parents ∪ child lists )    # set 合并去重
+scores = DistanceBatch(q, pool)
+return TopK(scores, k)
 ```
 
-**算法原理**：
-- 从HNSW的第`parent_level`层提取所有节点作为父节点
-- 这些节点在原始HNSW中具有较高的层级，意味着它们具有更好的全局代表性
-- 父节点的数量通常远小于总节点数，形成稀疏的聚类中心
+## 5. 参数交互与调优策略（更新）
 
-#### 1.2 子节点预计算（Child Node Precomputation）
+| 情况 | 观测指标 | 调整建议 |
+|------|----------|----------|
+| 覆盖率低 (overlap_unique_fraction 低) | unique_fraction < 0.6 | 增大 k_children 或 启用 repair_min=1 |
+| 重叠高 (mean_jaccard_overlap 高) | mean_jaccard > 0.35 | 启用/降低 diversify_max (例如 5→4→3) |
+| 高频点主导 (max_assignment_count 远高于均值) | max >> avg | 启用或进一步降低 diversify_max |
+| 召回仍然不足但 ρ 已高 | avg_candidate_size 接近 T | 增加 n_probe 或提高底层 base index 质量（m / ef_construction）|
+| 构建过慢 | mapping_build_time 高 | 改用 approx、降低 k_children、减少 repair_min |
 
-```python
-def _precompute_child_mappings(self, parent_nodes: List[Hashable]):
-    """为每个父节点预计算子节点映射"""
-    for parent_id in parent_nodes:
-        # 获取父节点向量
-        parent_vector = self.base_index[parent_id]
-        self.parent_vectors[parent_id] = parent_vector
-        
-        # 在基础索引中搜索k_children个最近邻
-        neighbors = self.base_index.query(parent_vector, k=self.k_children)
-        
-        # 提取子节点ID（排除父节点自身）
-        child_ids = []
-        for neighbor_id, distance in neighbors:
-            if neighbor_id != parent_id:
-                child_ids.append(neighbor_id)
-                self.child_vectors[neighbor_id] = self.base_index[neighbor_id]
-        
-        # 存储父-子映射
-        self.parent_child_map[parent_id] = child_ids
-```
+调优顺序建议：
+1. 先获得稳定父集合 (parent_level=2 或低一级回退)
+2. 设定 baseline：approx + k_children=1000 + n_probe=10
+3. 查看 overlap stats；若重叠高 → 设置 diversify_max=4；复测
+4. 若出现覆盖缺失 → repair_min=1
+5. 增加 n_probe 评估边际收益
+6. 必要时提高 k_children 或尝试 brute 小规模校准
 
-**算法原理**：
-- 对每个父节点，使用其向量作为查询，在完整的基础HNSW索引中搜索`k_children`个最近邻
-- 这些最近邻成为该父节点的"子节点"
-- 预计算过程确保每个父节点都有其对应的子节点集合
-- 子节点集合可能重叠，一个节点可能属于多个父节点
+## 6. 复杂度与新增操作影响
 
-### 阶段2：搜索阶段（Search Phase）
+| 操作 | 原始复杂度 | 新增影响 |
+|------|------------|----------|
+| 父提取 | O(P) | 不变 |
+| approx 子列表 | O(P * log N) | 与 ef 成正比 |
+| brute 子列表 | O(P * N) | 精确/昂贵，仅分析用 |
+| Diversify 过滤 | O(P * k_children) | 轻量，线性扫描 + 计数 |
+| Repair | O(D_deficit * P) 距离排序 | 若 deficit 小则可接受 |
+| Overlap 采样 | O(sample_pairs * k_children) | 默认 200 对，低成本 |
 
-#### 2.1 第一阶段：粗过滤（Coarse Filtering）
+## 7. 局限再评估（相对旧文档新增）
 
-```python
-def _stage1_coarse_search(self, query_vector: np.ndarray, n_probe: int) -> List[Tuple[Hashable, float]]:
-    """第一阶段：找到最接近的父节点"""
-    parent_distances = []
-    
-    # 计算到所有父节点的距离
-    for parent_id, parent_vector in self.parent_vectors.items():
-        distance = self.distance_func(query_vector, parent_vector)
-        parent_distances.append((distance, parent_id))
-    
-    # 按距离排序并返回前n_probe个
-    parent_distances.sort()
-    return parent_distances[:n_probe]
-```
+| 局限 | 描述 | 缓解策略 |
+|------|------|----------|
+| 过度多样化 | 过早放弃真实最近邻 | 调高 diversify_max 或关闭，多观测 recall 曲线 |
+| Repair 溢出 | 列表长度 > k_children 不均衡 | 未来可增加二次裁剪或软上限 |
+| 采样 Jaccard 方差 | 父数多时 sample_pairs 200 不稳定 | 自适应增大（按 sqrt(P)）|
+| 构建统计延迟 | 每次重建都计算 overlap | 缓存 + 允许 lazy 计算模式 |
 
-**算法原理**：
-- 使用暴力搜索计算查询向量到所有父节点的距离
-- 选择距离最近的`n_probe`个父节点作为候选区域
-- 时间复杂度：O(P × D)，其中P是父节点数量，D是向量维度
-- 由于父节点数量相对较少，这个阶段的计算开销是可接受的
+## 8. 未来方向（扩展版）
 
-#### 2.2 第二阶段：精过滤（Fine Filtering）
+1. 自适应 Diversify：基于局部密度自调每点允许出现次数
+2. 分层 Repair：优先补贴密度稀疏区域（基于父距离排名权重）
+3. 候选再平衡：对溢出父列表做局部截断并迁移冗余指派
+4. 结构学习：用聚类/量化代替直接用 HNSW 层级作为父集合
+5. 多指标联合：将 overlap 与查询真实 miss 的 ground truth 差异做回归，预测调参方向
 
-```python
-def _stage2_fine_search(self, query_vector: np.ndarray, parent_candidates: List[Tuple[Hashable, float]], k: int) -> List[Tuple[Hashable, float]]:
-    """第二阶段：在选定父节点的子节点中搜索"""
-    # 收集所有候选子节点
-    candidate_children = set()
-    for distance, parent_id in parent_candidates:
-        if parent_id in self.parent_child_map:
-            candidate_children.update(self.parent_child_map[parent_id])
-    
-    # 计算到所有候选子节点的距离
-    child_distances = []
-    for child_id in candidate_children:
-        if child_id in self.child_vectors:
-            distance = self.distance_func(query_vector, self.child_vectors[child_id])
-            child_distances.append((distance, child_id))
-    
-    # 按距离排序并返回前k个
-    child_distances.sort()
-    return child_distances[:k]
-```
+## 9. 总结 (Updated)
 
-**算法原理**：
-- 从第一阶段选定的父节点中收集所有子节点
-- 使用集合操作去重，避免重复计算
-- 计算查询向量到所有候选子节点的距离
-- 返回距离最近的k个结果
+新版 Hybrid 实现不再仅仅依赖“更多父列表 + 更多子候选”线性扩张召回，而是提供：
+1. 结构控制（Diversify / Repair）→ 直接作用于覆盖与冗余
+2. 诊断指标（Jaccard / assignment 分布 / unique fraction）→ 将“低召回”分解为“少覆盖 vs. 重叠过高”
+3. 双模式映射（approx/brute）→ 在成本可控前提下做质量校准
 
-## 关键参数分析
+因此调优已从黑盒试错转向“数据驱动的结构解释”。
 
-### 1. parent_level（父节点层级）
+> 实现细节请参考：`HNSW_Hybrid_Technical_Implementation.md` 中的构建与指标章节；本文聚焦算法动机与理论约束。
 
-**影响**：
-- 层级越高，父节点数量越少，第一阶段搜索越快
-- 层级越高，每个父节点覆盖的子节点越多，可能影响精度
-- 层级过低可能导致父节点过多，失去粗过滤的效果
-
-**推荐值**：
-- 小数据集（<10K）：level = 1
-- 中等数据集（10K-1M）：level = 2
-- 大数据集（>1M）：level = 2-3
-
-### 2. k_children（每个父节点的子节点数）
-
-**影响**：
-- 值越大，每个父节点覆盖的搜索空间越大，召回率越高
-- 值越大，第二阶段搜索的计算开销越大
-- 值过小可能导致搜索空间不足，召回率下降
-
-**推荐值**：
-- 快速搜索：k_children = 500
-- 平衡配置：k_children = 1000
-- 高精度：k_children = 2000-5000
-
-### 3. n_probe（第一阶段探测的父节点数）
-
-**影响**：
-- 值越大，覆盖的搜索空间越大，召回率越高
-- 值越大，第二阶段需要处理的子节点越多，计算开销越大
-- 值过小可能导致遗漏相关区域
-
-**推荐值**：
-- 快速搜索：n_probe = 5-10
-- 平衡配置：n_probe = 10-20
-- 高精度：n_probe = 20-50
-
-## 算法复杂度分析
-
-### 时间复杂度
-
-**构建阶段**：
-- 父节点提取：O(P)，其中P是父节点数量
-- 子节点预计算：O(P × T_search)，其中T_search是HNSW搜索时间
-- 总体：O(P × T_search)
-
-**搜索阶段**：
-- 第一阶段：O(P × D)
-- 第二阶段：O(C × D)，其中C是候选子节点数量
-- 总体：O((P + C) × D)
-
-### 空间复杂度
-
-- 父节点向量存储：O(P × D)
-- 子节点向量存储：O(N × D)，其中N是总节点数
-- 父-子映射：O(P × k_children)
-- 总体：O((P + N) × D + P × k_children)
-
-## 性能优势分析
-
-### 1. 召回率提升
-
-**原理**：
-- 两阶段搜索避免了单阶段搜索可能出现的局部最优问题
-- 通过多个父节点的覆盖，增加了搜索的多样性
-- 预计算的子节点映射确保了相关区域的完整覆盖
-
-**实验数据**：
-- 相比标准HNSW，召回率提升10-20%
-- 在相同计算资源下，可以达到更高的精度
-
-### 2. 搜索效率
-
-**原理**：
-- 第一阶段快速定位相关区域，避免在全空间搜索
-- 第二阶段在较小的候选集中进行精确搜索
-- 总体搜索时间可控，且具有良好的可预测性
-
-### 3. 参数可调性
-
-**原理**：
-- k_children和n_probe参数提供了精度-效率的灵活权衡
-- 可以根据具体应用场景调整参数
-- 支持动态参数优化和自适应调整
-
-## 算法局限性
-
-### 1. 构建开销
-
-- 需要预计算父-子映射，增加了构建时间
-- 存储开销比标准HNSW略高
-- 不适合频繁更新的动态数据集
-
-### 2. 参数敏感性
-
-- 参数选择对性能影响较大
-- 需要针对具体数据集进行调优
-- 参数设置不当可能导致性能下降
-
-### 3. 内存使用
-
-- 需要存储额外的父-子映射信息
-- 子节点向量可能重复存储
-- 大规模数据集下内存需求较高
-
-## 适用场景
-
-### 1. 高召回率要求
-
-- 推荐系统：需要找到尽可能多的相关物品
-- 图像检索：需要检索到所有相似图像
-- 语义搜索：需要覆盖所有相关文档
-
-### 2. 大规模数据集
-
-- 百万级以上的向量数据集
-- 对搜索精度要求较高的应用
-- 可以接受一定构建开销的场景
-
-### 3. 离线构建，在线查询
-
-- 数据集相对稳定的应用
-- 查询频率远高于更新频率
-- 可以预先进行参数优化的场景
-
-## 未来改进方向
-
-### 1. 自适应参数调整
-
-- 根据查询模式动态调整n_probe
-- 基于数据分布自动选择parent_level
-- 实现参数的自适应优化
-
-### 2. 多级层次结构
-
-- 扩展到三级或更多级的搜索
-- 实现更细粒度的区域划分
-- 支持更复杂的层次化搜索策略
-
-### 3. 并行化优化
-
-- 第一阶段搜索的并行化
-- 第二阶段搜索的GPU加速
-- 构建过程的分布式计算
-
-### 4. 动态更新支持
-
-- 支持增量式父-子映射更新
-- 实现高效的动态插入和删除
-- 保持索引结构的一致性
-
-## 总结
-
-HNSW Hybrid 两阶段检索系统通过创新的两阶段搜索架构，在保持搜索效率的同时显著提升了召回性能。该算法特别适用于对召回率要求较高的应用场景，通过合理的参数调优，可以在精度和效率之间找到最佳平衡点。
-
-算法的核心优势在于其灵活的参数控制和良好的可扩展性，为大规模向量检索提供了新的解决方案。随着技术的不断发展，该算法有望在更多领域得到应用和优化。
+---
+*本原则文档已同步 2025-09 实现。若后续加入分层聚类/量化父节点或自适应参数，请在 §3 / §5 / §6 / §8 扩展。*

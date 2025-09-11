@@ -13,6 +13,19 @@
 5. 旧脚本折叠为存根（后续版本将删除）：`optimized_hybrid_hnsw.py`, `experiment_runner.py`, `parameter_tuning.py`, `demo_hybrid_fix.py`, `simple_baseline_recall_test.py`, `test_optimized_recall.py`（占位空测试）。
 6. 推荐入口：参数扫描 → `ComprehensiveEvaluator`；单索引实验 → `HybridHNSWIndex` + 公平拆分函数。
 
+### 🔄 新增技术特性（已更新到 `HNSW_Hybrid_Technical_Implementation.md`）
+近期为 Hybrid 两阶段系统补充了下列核心能力，并在技术实现文档中详细说明：
+
+| 特性 | 说明 | 相关方法 |
+|------|------|----------|
+| 父→子映射双模式 | `approx`（HNSW近似）与 `brute`（精确暴力） | `build_parent_child_mapping(method=...)` |
+| 多样化分配 Diversification | 限制同一向量进入父列表的次数，减少高重叠 | `diversify_max_assignments` 参数 |
+| 覆盖修复 Repair | 确保每个向量最少出现在若干父列表中 | `repair_min_assignments` 参数 |
+| 重叠/覆盖统计 | 采样父列表 Jaccard、唯一覆盖率、分配次数分布 | `mapping_overlap_stats()` / `stats()` |
+| 批量基准脚本 | 输出覆盖与重叠指标到 CSV 便于分析 | `batch_hybrid_benchmark.py` |
+
+> 详情请参见：`HNSW_Hybrid_Technical_Implementation.md` 中的 “构建阶段” / “重叠统计” / “调优流程” 小节。
+
 快速示例：
 ```python
 from hnsw_hybrid_evaluation import (

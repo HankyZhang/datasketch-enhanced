@@ -1,23 +1,257 @@
 # HNSW Hybrid Two-Stage Retrieval System - Technical Implementation Details
 
-## 技术实现架构
+> 本文档已更新以匹配当前统一实现类 `HybridHNSWIndex`（参见 `hnsw_hybrid_evaluation.py`），替换旧的占位示例 `HNSWHybrid`。新增的父子映射多样化 (diversification)、覆盖修复 (repair)、以及重叠统计 (overlap stats) 已纳入。
 
-### 1. 核心类结构
+## 0. 组件概览
+
+| 模块 | 作用 | 关键方法 |
+|------|------|----------|
+| `HybridHNSWIndex` | 两阶段混合检索主类 | `build_base_index` / `extract_parent_nodes` / `build_parent_child_mapping` / `search` / `stats` |
+| Parent Extraction | 从 HNSW 某层抽取“父节点” | `extract_parent_nodes(level)` |
+| Parent→Children 映射 | 为每个父节点预计算子候选集合 | `build_parent_child_mapping(method=approx|brute, diversify…, repair…)` |
+| Query Stage 1 | 向量化父节点筛选 | 私有 `_find_closest_parents` |
+| Query Stage 2 | 合并父节点子集合并精排 | `search` |
+| Metrics / Coverage | 构建 & 查询统计、覆盖率、重叠度 | `coverage` / `stats` |
+| Overlap Analysis | 评估候选重复度与冗余 | `mapping_overlap_stats` |
+
+## 1. 核心类结构（现行）
 
 ```python
-class HNSWHybrid:
-    """Hybrid HNSW索引，实现两阶段检索系统"""
-    
-    def __init__(self, base_index, parent_level=2, k_children=1000, distance_func=None):
-        # 核心数据结构
-        self.parent_child_map: Dict[Hashable, List[Hashable]] = {}  # 父-子映射
-        self.parent_vectors: Dict[Hashable, np.ndarray] = {}        # 父节点向量
-        self.child_vectors: Dict[Hashable, np.ndarray] = {}         # 子节点向量
-        
-    def search(self, query_vector, k=10, n_probe=10):
-        # 两阶段搜索主入口
-        pass
+class HybridHNSWIndex:
+    def __init__(
+        self,
+        distance_func=None,
+        k_children: int = 1000,
+        n_probe: int = 10,
+        parent_child_method: str = 'approx'
+    ):
+        # 参数：
+        # k_children        每个父节点预存的子节点候选数上限
+        # n_probe           查询阶段要探测 (probe) 的父节点数量
+        # parent_child_method 'approx' 使用底层 HNSW 查询；'brute' 对全量向量暴力距离
+        # distance_func      可选的距离函数（缺省 L2）
+        ...
+
+    def build_base_index(self, dataset: Dict[int, np.ndarray], m=16, ef_construction=200): ...
+    def extract_parent_nodes(self, target_level: int = 2): ...
+    def build_parent_child_mapping(
+        self,
+        method: str = None,
+        ef: int = 50,
+        brute_force_batch: int = 4096,
+        diversify_max_assignments: int = None,
+        repair_min_assignments: int = None,
+        repair_log_limit: int = 10,
+    ): ...
+    def search(self, query_vector: np.ndarray, k: int = 10): ...
+    def stats(self) -> Dict[str, float]: ...
 ```
+
+### 1.1 新增参数说明
+
+| 参数 | 阶段 | 作用 | 调优影响 |
+|------|------|------|----------|
+| `k_children` | 构建 | 每父节点子列表长度（基准候选规模） | 增大→召回可能升高/内存↑ 构建时间↑ |
+| `n_probe` | 查询 | 选取最近的父节点数量 | 增大→候选去重后有效覆盖↑ 查询耗时略增 |
+| `parent_child_method` | 构建 | `approx` / `brute` 生成子集策略 | `brute` 更精准但 O(N·P) 成本高 |
+| `ef` (approx mapping) | 构建 | 近似阶段临时扩展宽度 | 过低会使父子重叠集中 |
+| `diversify_max_assignments` | 构建 | 限制同一个数据点能进入多少个父列表（初始选择期） | 减低交集，提升 unique 覆盖率 |
+| `repair_min_assignments` | 构建 | 确保每个点至少被分配到若干父节点（修复第二阶段） | 降低“孤点”风险，可能扩大列表长度 |
+
+### 1.2 内部数据
+
+| 成员 | 描述 |
+|------|------|
+| `parent_ids` | 选作父节点的 ID 列表（来自某层图） |
+| `_parent_matrix` | 父节点向量堆叠 (NumPy, shape = P×D) 支持向量化 L2 计算 |
+| `parent_child_map` | `parent_id -> [child_id,...]` 预计算候选集合 |
+| `search_times` / `candidate_sizes` | 累积查询时间 / 每次查询候选集合大小（用于平均统计） |
+| `_overlap_stats` | 最近一次映射构建的重叠度统计缓存 |
+
+## 2. 构建阶段
+
+### 2.1 Base Index 构建
+
+```python
+index.build_base_index(dataset, m=16, ef_construction=200)
+```
+直接封装底层 `HNSW.update()` 批量导入。记录 `base_build_time`。
+
+### 2.2 父节点提取 `extract_parent_nodes(target_level)`
+
+从 HNSW 图结构 `_graphs[target_level]` 的键集作为父节点。若请求层超出当前最高层，则下调到最高合法层。
+
+时间复杂度：O(P) 复制 + O(P) 向量堆叠。
+
+### 2.3 父→子映射构建 `build_parent_child_mapping`
+
+总体流程：
+1. 遍历每个父节点 p
+2. 生成 raw 子候选（approx: HNSW query；brute: 批量 L2）
+3. 应用多样化限制 (diversify) —— 控制点的全局出现次数
+4. 必要时补足 (backfill) 以达到 k_children
+5. 完成所有父节点后执行可选修复 (repair)，将低频分配点加入最近父节点列表
+6. 计算重叠统计 `_overlap_stats`
+
+#### 2.3.1 Approx vs Brute
+
+| 模式 | 伪代码 | 适用 |
+|------|--------|------|
+| approx | `base_index.query(pvec, k=k_children+1, ef=ef)` | 大数据/性能优先 |
+| brute | 全量批量 L2 + 排序 | 小数据 / 分析精度 |
+
+#### 2.3.2 Diversification (全局限制)
+
+目的：避免少数密集点在众多父节点列表中反复出现导致有效覆盖 (unique coverage) 偏低。
+
+策略：
+```text
+遍历父节点 raw_child_ids:
+  若 child 当前 assignments < diversify_max_assignments 则接受
+  否则放入 skipped (候补)
+若接受数量 < k_children：使用 skipped 回填
+```
+
+#### 2.3.3 Repair (最小分配保障)
+
+收集 assignment_counts 中出现次数 < `repair_min_assignments` 的点；
+对每个点计算与全部父节点的距离（复用 `_parent_matrix` 向量化），按近邻依次插入尚未包含该点的父列表（允许超过 k_children 上限）。
+
+#### 2.3.4 重叠统计 `mapping_overlap_stats()`
+
+输出字段：
+| 字段 | 含义 |
+|------|------|
+| `overlap_unique_fraction` | 被至少一个父列表覆盖的独立点数 / 总数据量 |
+| `avg_assignment_count` | 每个（被覆盖）点平均出现次数 |
+| `multi_coverage_fraction` | 出现次数 >1 的点占已覆盖点比例 |
+| `mean_jaccard_overlap` | 随机采样父列表对之间的平均 Jaccard 交并比 |
+| `median_jaccard_overlap` | 上述采样的中位数 |
+| `max_assignment_count` | 单个点出现的最大父列表次数 |
+
+> 这些指标用于解释“候选总量大但去重后有效候选低”导致的召回瓶颈。
+
+## 3. 查询阶段
+
+### 3.1 父节点选择（向量化）
+
+```python
+diffs = _parent_matrix - qvec           # (P, D)
+dists = np.linalg.norm(diffs, axis=1)
+idx = np.argpartition(dists, n_probe)[:n_probe]
+```
+复杂度：O(P·D) L2；P 通常远小于 N。
+
+### 3.2 候选集合合并与精排
+
+1. 初始化：`cids = set(selected_parent_ids)`（父本身可作为近邻候选）
+2. 合并所有父的 `parent_child_map[pid]`
+3. 对去重后的 `|C|` 候选向量批量构建矩阵并一次性 L2 计算
+4. 取前 k 输出
+
+记录：`candidate_sizes.append(len(C))`，便于分析覆盖与召回关系。
+
+## 4. 指标与分析
+
+`stats()` 汇总：
+| 指标 | 描述 |
+|------|------|
+| `base_build_time` | 底层 HNSW 构建时间 |
+| `parent_extraction_time` | 父节点抽取耗时 |
+| `mapping_build_time` | 父→子映射生成耗时 |
+| `avg_search_time` | 平均单查询耗时 |
+| `avg_candidate_size` | 查询阶段候选集合去重后平均大小 |
+| `coverage_fraction` | 至少被一个父列表包含的点比例 |
+| `parent_count` | 父节点数 |
+| `covered_points` / `total_points` | 覆盖点数 / 总点数 |
+| （Overlap Stats） | `overlap_unique_fraction` 等重叠指标 |
+
+### 4.1 覆盖 vs 召回 核心解释
+
+理论候选上界：`n_probe * k_children`；实际去重后：`avg_candidate_size`。
+
+若：
+```text
+avg_candidate_size  <<  n_probe * k_children
+且 mean_jaccard_overlap 高 / avg_assignment_count 高
+```
+→ 表示父列表高度重叠，真实独立点覆盖不足 ⇒ 召回受限。
+
+多样化参数 `diversify_max_assignments` 可降低重叠，提升 `overlap_unique_fraction`；过小会削弱每个父列表质量（局部密度）需平衡。`repair_min_assignments` 补救极端未覆盖点。
+
+## 5. 性能特征与权衡
+
+| 优化项 | 提升 | 代价 |
+|--------|------|------|
+| 提高 `n_probe` | 召回↑ | 查询耗时↑ |
+| 提高 `k_children` | 召回潜力↑ | 构建时间 & 内存↑ |
+| Diversify 启用 | Unique 覆盖↑ | 可能减弱局部密度 |
+| Repair 启用 | 防止漏覆盖 | 列表长度可能超限 |
+| Brute 映射 | 精准排序 | O(N·P) 代价大 |
+
+## 6. 典型调优流程建议
+
+1. 基准：`approx` + 适中 `k_children` (500~1000) + `n_probe=5~10`
+2. 观察 `coverage_fraction` 与 `recall@k` 相关性
+3. 若覆盖低且 overlap 高 → 加入 `diversify_max_assignments` (比如 3~5)
+4. 若出现未被覆盖点（可抽样检查）→ 设定 `repair_min_assignments=1~2`
+5. 调整 `n_probe` 直到边际收益下降
+6. 再考虑增大 `k_children` 或切换部分父集合到 `brute` 进行质量对比
+
+## 7. 与旧设计差异（迁移说明）
+
+| 旧文档概念 | 当前实现 | 变化原因 |
+|------------|----------|----------|
+| `HNSWHybrid` 占位类 | `HybridHNSWIndex` | 统一核心逻辑，避免多实现漂移 |
+| 手动父向量字典 | 自动 `_parent_matrix` | 向量化加速父距离计算 |
+| 无多样化控制 | `diversify_max_assignments` | 减少高频点霸占，提高独立覆盖 |
+| 无修复 | `repair_min_assignments` | 保证弱局部点被索引覆盖 |
+| 无重叠统计 | `_overlap_stats` + `mapping_overlap_stats()` | 可解释召回瓶颈来源 |
+| 简单候选统计 | `avg_candidate_size` + 覆盖 + 重叠 | 更丰富诊断信息 |
+
+## 8. 示例：构建 & 查询片段
+
+```python
+dataset = {i: np.random.randn(128).astype(np.float32) for i in range(5000)}
+
+index = HybridHNSWIndex(k_children=800, n_probe=8, parent_child_method='approx')
+index.build_base_index(dataset, m=16, ef_construction=200)
+index.extract_parent_nodes(target_level=2)
+index.build_parent_child_mapping(
+    method='approx', ef=80,
+    diversify_max_assignments=4,
+    repair_min_assignments=1
+)
+
+qvec = dataset[0]
+results = index.search(qvec, k=10)
+print(results[:3])
+print(index.stats())
+```
+
+## 9. 局限与未来方向
+
+| 局限 | 说明 | 潜在改进 |
+|------|------|----------|
+| 父节点层分布偏少 | 小数据或构建参数导致高层节点极少 | 动态选择较低层/聚类补充父集合 |
+| L2 单一距离 | 无法直接使用内积/余弦归一 | 预归一向量或自定义 distance_func |
+| 修复阶段可能扩张列表 | 列表长度 > k_children 导致内存不可控 | 限制溢出预算 + 逐步再平衡 |
+| 重叠统计采样近似 | 大量父节点下 Jaccard 采样存在方差 | 自适应采样大小或全量并行计算 |
+
+## 10. 总结
+
+当前 `HybridHNSWIndex` 将“两阶段父导航 + 预计算子集合”流程与“多样化 / 修复 / 重叠度度量”组合：
+
+1. 通过父层向量化距离快速定位候选区域
+2. 预先扩展并缓存子邻域降低在线查询成本
+3. 使用多样化减少重复点，提升有效覆盖空间
+4. 修复确保 long-tail 数据点不被忽略
+5. 重叠统计为召回瓶颈提供可解释诊断信号
+
+这一结构既能支撑实验对比（approx vs brute，覆盖 vs 召回），又为后续引入更高层次（聚类 / 分桶 / 动态路由）提供了扩展基座。
+
+---
+*本文件已同步至最新实现；若代码接口再变更，请在新增参数处补充上表，并更新“差异”小节。*
 
 ### 2. 数据结构设计
 
