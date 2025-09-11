@@ -4,7 +4,43 @@
 
 这是一个专注于HNSW (Hierarchical Navigable Small World) 算法的高性能实现，特别为中文开发者提供了详尽的文档和代码注释。
 
-## � 最新重大更新：HNSW Hybrid 两阶段检索系统 - 完整实现
+近期结构性调整摘要：
+
+1. 统一实现：所有 Hybrid / 评估 / 优化逻辑合并到 `hnsw_hybrid_evaluation.py` 与 `complete_hybrid_evaluation.py`。
+2. 公平评测：新增 `split_query_set_from_dataset`，保证查询不出现在索引构建数据中，消除数据泄漏。
+3. 双模式父子映射：`HybridHNSWIndex.build_parent_child_mapping(method=...)` 支持 `approx`（默认，利用 HNSW 查询）与 `brute`（精确匹配，用于验证 / 小规模）。
+4. 向量化优化：父节点矩阵缓存 + 矢量距离批量计算；搜索阶段使用 `np.argpartition` 做候选剪枝。
+5. 旧脚本折叠为存根（后续版本将删除）：`optimized_hybrid_hnsw.py`, `experiment_runner.py`, `parameter_tuning.py`, `demo_hybrid_fix.py`, `simple_baseline_recall_test.py`, `test_optimized_recall.py`（占位空测试）。
+6. 推荐入口：参数扫描 → `ComprehensiveEvaluator`；单索引实验 → `HybridHNSWIndex` + 公平拆分函数。
+
+快速示例：
+```python
+from hnsw_hybrid_evaluation import (
+    HybridHNSWIndex, generate_synthetic_dataset, split_query_set_from_dataset
+)
+
+data = generate_synthetic_dataset(20000, 128)
+base_data, queries = split_query_set_from_dataset(data, n_queries=500, seed=42)
+
+index = HybridHNSWIndex(k_children=1200, n_probe=15, parent_child_method='approx')
+index.build_base_index(base_data)
+index.extract_parent_nodes(target_level=2)
+index.build_parent_child_mapping(method=index.parent_child_method)
+
+qid, qvec = next(iter(queries.items()))
+neighbors = index.search(qvec, k=10)
+```
+
+父子映射模式对比：
+
+| 模式 | 适用场景 | 优点 | 代价 |
+|------|----------|------|------|
+| approx | 中/大规模主用 | 构建快 | 近似，轻微偏差可能 |
+| brute  | 小规模 / 校验 | 结果精确 | 计算 O(N * #parents) |
+
+---
+
+## 🆕 最新重大更新：HNSW Hybrid 两阶段检索系统 - 完整实现
 
 我们刚刚完成了 **HNSW Hybrid 两阶段检索系统** 的完整实现！这是一个革命性的改进，按照详细的项目行动指南，将标准HNSW转换为高性能的两阶段检索架构。
 

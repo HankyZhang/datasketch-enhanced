@@ -4,7 +4,10 @@ Complete HNSW Hybrid Two-Stage Retrieval System Evaluation
 ==========================================================
 
 This script implements the complete project action guide for HNSW improvements
-with comprehensive evaluation and parameter tuning.
+with comprehensive evaluation and parameter sweeps. Legacy standalone scripts
+(`optimized_hybrid_hnsw.py`, `experiment_runner.py`, `parameter_tuning.py`,
+`demo_hybrid_fix.py`) have been removed; their functionality is merged here
+and in `hnsw_hybrid_evaluation.py`.
 
 Project Phases:
 1. Project Objectives and Core Concept Definition

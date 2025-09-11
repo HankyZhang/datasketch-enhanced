@@ -13,6 +13,9 @@ from typing import Dict, List, Tuple
 from datasketch import HNSW
 from hnsw_hybrid_evaluation import generate_synthetic_dataset, create_query_set
 
+# DEPRECATED: Functionality merged into hnsw_hybrid_evaluation.HybridHNSWIndex
+# This file kept temporarily to avoid import errors; will be removed.
+
 class OptimizedHybridHNSW:
     """
     Performance-optimized version of Hybrid HNSW

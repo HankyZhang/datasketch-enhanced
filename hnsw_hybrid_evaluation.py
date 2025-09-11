@@ -27,9 +27,8 @@ class HybridHNSWIndex:
     """
     
     def __init__(self, distance_func=None, k_children: int = 1000, n_probe: int = 10):
-        """
-        Initialize the hybrid HNSW index.
-        
+        """Initialize the hybrid HNSW index.
+
         Args:
             distance_func: Distance function for similarity computation
             k_children: Number of child nodes per parent (default: 1000)
@@ -38,16 +37,18 @@ class HybridHNSWIndex:
         self.distance_func = distance_func or self._l2_distance
         self.k_children = k_children
         self.n_probe = n_probe
-        
+
         # Core data structures
         self.base_index = None
-        self.parent_ids = []
-        self.parent_child_map = {}
+        self.parent_ids = []            # Parent node IDs
+        self.parent_child_map = {}      # parent_id -> children list
         self.parent_vectors = {}
+        self._parent_matrix = None      # Cached parent vectors matrix
+        self._parent_id_index = {}      # parent_id -> row index
         self.dataset = {}
-        
+
         # Performance tracking
-        self.build_time = 0
+        self.build_time = 0.0
         self.search_times = []
         
     def _l2_distance(self, x, y):
@@ -112,106 +113,114 @@ class HybridHNSWIndex:
             self.parent_ids = list(layer._graph.keys())
         
         # Store parent vectors for quick access
-        self.parent_vectors = {
-            parent_id: self.dataset[parent_id] 
-            for parent_id in self.parent_ids
-        }
+        self.parent_vectors = {parent_id: self.dataset[parent_id] for parent_id in self.parent_ids}
+        # Build cached matrix for vectorized distance in Stage 1
+        if self.parent_ids:
+            self._parent_matrix = np.stack([self.parent_vectors[pid] for pid in self.parent_ids], axis=0)
+            self._parent_id_index = {pid: i for i, pid in enumerate(self.parent_ids)}
+        else:
+            self._parent_matrix = None
+            self._parent_id_index = {}
         
         print(f"Extracted {len(self.parent_ids)} parent nodes from level {target_level}")
         return self.parent_ids
     
-    def build_parent_child_mapping(self):
+    def build_parent_child_mapping(self, method: str = "approx", ef: int = 50, brute_force_batch: int = 4096):
+        """Build the parent->children mapping.
+
+        Args:
+            method: 'approx' (default) uses HNSW queries; 'brute' computes exact distances.
+            ef: ef parameter for approximate queries (only for method='approx').
+            brute_force_batch: batching size for brute force distance computation.
+
+        Returns:
+            The parent_child_map dict.
         """
-        Build the parent-child mapping by finding k_children nearest neighbors
-        for each parent node.
-        """
-        print(f"Building parent-child mapping with k_children={self.k_children}...")
+        print(f"Building parent-child mapping (method={method}, k_children={self.k_children})...")
         start_time = time.time()
-        
         if not self.parent_ids:
             raise ValueError("Parent nodes must be extracted first")
-        
         self.parent_child_map = {}
-        
-        for i, parent_id in enumerate(self.parent_ids):
-            if i % 100 == 0:
-                print(f"Processing parent {i+1}/{len(self.parent_ids)}")
-            
-            # Get parent vector
-            parent_vector = self.dataset[parent_id]
-            
-            # Search for k_children nearest neighbors
-            neighbors = self.base_index.query(parent_vector, k=self.k_children + 1)
-            
-            # Remove the parent itself from neighbors and store children
-            child_ids = [nid for nid, _ in neighbors if nid != parent_id][:self.k_children]
+
+        if method not in {"approx", "brute"}:
+            raise ValueError("method must be 'approx' or 'brute'")
+
+        dim = next(iter(self.dataset.values())).shape[0] if self.dataset else 0
+        data_ids = list(self.dataset.keys())
+        if method == "brute":
+            data_matrix = np.stack([self.dataset[i] for i in data_ids], axis=0)
+
+        total = len(self.parent_ids)
+        for idx, parent_id in enumerate(self.parent_ids):
+            if idx % max(1, total // 10) == 0 or idx == total - 1:
+                pct = (idx + 1) / total * 100
+                elapsed = time.time() - start_time
+                rate = (idx + 1) / elapsed if elapsed > 0 else 0
+                eta = (total - idx - 1) / rate if rate > 0 else 0
+                print(f"  [{idx+1}/{total}] {pct:5.1f}% elapsed={elapsed:.1f}s eta={eta:.1f}s")
+
+            parent_vec = self.dataset[parent_id]
+
+            if method == "approx":
+                neighbors = self.base_index.query(parent_vec, k=self.k_children + 1, ef=ef)
+                child_ids = [nid for nid, _ in neighbors if nid != parent_id][:self.k_children]
+            else:  # brute
+                # Compute distances to all in batches to limit memory
+                dists = []
+                for start in range(0, len(data_ids), brute_force_batch):
+                    batch_ids = data_ids[start:start + brute_force_batch]
+                    batch_vectors = data_matrix[start:start + brute_force_batch]
+                    # (batch, dim) vs (dim,) => (batch,)
+                    batch_d = np.linalg.norm(batch_vectors - parent_vec, axis=1)
+                    dists.extend(zip(batch_ids, batch_d))
+                dists.sort(key=lambda x: x[1])
+                child_ids = [i for i, _ in dists if i != parent_id][:self.k_children]
+
             self.parent_child_map[parent_id] = child_ids
-        
+
         mapping_time = time.time() - start_time
-        print(f"Parent-child mapping built in {mapping_time:.2f} seconds")
+        print(f"Parent-child mapping built in {mapping_time:.2f} seconds (method={method})")
         self.build_time = mapping_time
-        
         return self.parent_child_map
     
     def _find_closest_parents(self, query_vector: np.ndarray) -> List[int]:
-        """
-        Find the closest parent nodes to the query vector.
-        
-        Args:
-            query_vector: Query vector to search for
-            
-        Returns:
-            List of closest parent node IDs
-        """
-        parent_distances = []
-        
-        for parent_id in self.parent_ids:
-            parent_vector = self.parent_vectors[parent_id]
-            distance = self.distance_func(query_vector, parent_vector)
-            parent_distances.append((parent_id, distance))
-        
-        # Sort by distance and return top n_probe parents
-        parent_distances.sort(key=lambda x: x[1])
-        return [pid for pid, _ in parent_distances[:self.n_probe]]
+        """Vectorized Stage 1 parent selection."""
+        if self._parent_matrix is None or not len(self.parent_ids):
+            return []
+        # Compute distances in a single vectorized op: shape (N_parents,)
+        diffs = self._parent_matrix - query_vector
+        dists = np.linalg.norm(diffs, axis=1)
+        # Partial argsort for efficiency
+        if self.n_probe < len(dists):
+            top_idx = np.argpartition(dists, self.n_probe)[:self.n_probe]
+            # Order those top indices
+            top_idx = top_idx[np.argsort(dists[top_idx])]
+        else:
+            top_idx = np.argsort(dists)
+        return [self.parent_ids[i] for i in top_idx[:self.n_probe]]
     
     def search(self, query_vector: np.ndarray, k: int = 10) -> List[Tuple[int, float]]:
-        """
-        Perform two-stage search using the hybrid index.
-        
-        Args:
-            query_vector: Query vector to search for
-            k: Number of nearest neighbors to return
-            
-        Returns:
-            List of (node_id, distance) tuples
-        """
+        """Two-stage search (vectorized Stage 1 & batch Stage 2)."""
         start_time = time.time()
-        
-        # Stage 1: Find closest parent nodes
         closest_parents = self._find_closest_parents(query_vector)
-        
-        # Stage 2: Collect all child candidates
-        candidate_ids = set()
+        candidate_ids = set(closest_parents)
         for parent_id in closest_parents:
-            if parent_id in self.parent_child_map:
-                candidate_ids.update(self.parent_child_map[parent_id])
-        
-        # Add parent nodes themselves as candidates
-        candidate_ids.update(closest_parents)
-        
-        # Compute distances for all candidates
-        candidate_results = []
-        for candidate_id in candidate_ids:
-            candidate_vector = self.dataset[candidate_id]
-            distance = self.distance_func(query_vector, candidate_vector)
-            candidate_results.append((candidate_id, distance))
-        
-        # Sort by distance and return top k
-        candidate_results.sort(key=lambda x: x[1])
-        search_time = time.time() - start_time
-        self.search_times.append(search_time)
-        
-        return candidate_results[:k]
+            candidate_ids.update(self.parent_child_map.get(parent_id, ()))
+        if not candidate_ids:
+            return []
+        candidates = list(candidate_ids)
+        cand_matrix = np.stack([self.dataset[cid] for cid in candidates], axis=0)
+        dists = np.linalg.norm(cand_matrix - query_vector, axis=1)
+        if k < len(dists):
+            top_idx = np.argpartition(dists, k)[:k]
+            # Sort selected
+            order = np.argsort(dists[top_idx])
+            top_idx = top_idx[order]
+        else:
+            top_idx = np.argsort(dists)
+        results = [(candidates[i], float(dists[i])) for i in top_idx[:k]]
+        self.search_times.append(time.time() - start_time)
+        return results
 
 
 class RecallEvaluator:
@@ -361,65 +370,86 @@ def generate_synthetic_dataset(n_vectors: int = 60000, dim: int = 128) -> Dict[i
 
 
 def create_query_set(dataset: Dict[int, np.ndarray], n_queries: int = 1000) -> Dict[int, np.ndarray]:
+    """(LEGACY) Sample queries directly from dataset WITHOUT removal.
+
+    NOTE: This keeps queries inside the base index and is kept only for backward
+    compatibility with older scripts. New code SHOULD use
+    :func:`split_query_set_from_dataset` to ensure queries are excluded from
+    the index build for fair evaluation (Project Guide Phase 2 requirement).
     """
-    Create a query set by sampling from the dataset.
-    
-    Args:
-        dataset: Complete dataset
-        n_queries: Number of queries to sample
-        
-    Returns:
-        Dictionary of query vectors
-    """
-    print(f"Creating query set with {n_queries} queries...")
-    
-    # Randomly sample query IDs
+    print("[WARN] create_query_set() keeps queries in dataset. Prefer split_query_set_from_dataset().")
     all_ids = list(dataset.keys())
-    np.random.seed(123)  # Different seed for queries
+    if n_queries > len(all_ids):
+        n_queries = len(all_ids)
+    np.random.seed(123)
     query_ids = np.random.choice(all_ids, size=n_queries, replace=False)
-    
+    return {qid: dataset[qid] for qid in query_ids}
+
+
+def split_query_set_from_dataset(dataset: Dict[int, np.ndarray], n_queries: int = 1000,
+                                 seed: int = 123) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
+    """Split dataset into (dataset_without_queries, query_set) for fair evaluation.
+
+    Ensures query vectors are NOT inserted into the base index, aligning with
+    the project specification: query set must not be "seen" during index
+    construction. (Project Action Guide Phase 2)
+
+    Args:
+        dataset: Full dataset mapping id->vector
+        n_queries: Number of queries to sample
+        seed: RNG seed for reproducibility
+
+    Returns:
+        (dataset_no_queries, query_set)
+    """
+    total = len(dataset)
+    if n_queries >= total:
+        raise ValueError("n_queries must be smaller than dataset size")
+    rng = np.random.default_rng(seed)
+    all_ids = list(dataset.keys())
+    query_ids = set(rng.choice(all_ids, size=n_queries, replace=False))
     query_set = {qid: dataset[qid] for qid in query_ids}
-    
-    print("Query set creation completed")
-    return query_set
+    dataset_no_queries = {did: vec for did, vec in dataset.items() if did not in query_ids}
+    print(f"Split dataset: {len(dataset_no_queries)} training vectors, {len(query_set)} query vectors (removed from index)")
+    return dataset_no_queries, query_set
 
 
 if __name__ == "__main__":
     # Configuration
-    DATASET_SIZE = 60000  # Start with smaller dataset for testing
+    DATASET_SIZE = 60000  # Adjust as needed
     VECTOR_DIM = 128
     N_QUERIES = 1000
     K = 10
-    
-    print("=== HNSW Hybrid Two-Stage Retrieval System Evaluation ===")
-    print(f"Dataset size: {DATASET_SIZE}")
+
+    print("=== HNSW Hybrid Two-Stage Retrieval System Evaluation (Fair Split) ===")
+    print(f"Full dataset size: {DATASET_SIZE}")
     print(f"Vector dimension: {VECTOR_DIM}")
-    print(f"Number of queries: {N_QUERIES}")
+    print(f"Number of queries (held-out): {N_QUERIES}")
     print(f"k for evaluation: {K}")
     print()
-    
+
     # Phase 1: Generate dataset
-    dataset = generate_synthetic_dataset(DATASET_SIZE, VECTOR_DIM)
-    query_set = create_query_set(dataset, N_QUERIES)
-    
+    full_dataset = generate_synthetic_dataset(DATASET_SIZE, VECTOR_DIM)
+    train_dataset, query_set = split_query_set_from_dataset(full_dataset, N_QUERIES)
+
     # Phase 2: Build and evaluate hybrid index
     print("\n=== Building Hybrid HNSW Index ===")
     hybrid_index = HybridHNSWIndex(k_children=1000, n_probe=10)
-    
-    # Build base index
-    hybrid_index.build_base_index(dataset)
-    
+
+    # Build base index ONLY on training portion
+    hybrid_index.build_base_index(train_dataset)
+
     # Extract parent nodes
     hybrid_index.extract_parent_nodes(target_level=2)
-    
+
     # Build parent-child mapping
     hybrid_index.build_parent_child_mapping()
-    
+
     # Phase 3: Evaluate recall
     print("\n=== Evaluating Recall Performance ===")
-    evaluator = RecallEvaluator(dataset)
+    evaluator = RecallEvaluator(train_dataset)  # ground truth over train set
     results = evaluator.evaluate_recall(hybrid_index, query_set, k=K)
-    
+
     # Print final results
     print("\n=== Final Results ===")
     for key, value in results.items():
