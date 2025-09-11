@@ -16,10 +16,10 @@ Dataset Size | Build Time | Rate (vectors/sec) | Expected Rate
 10,000       | 83.5s     | 120                | 250+
 ```
 
-### 🔴 **Problem 2: Hybrid Recall Performance**
-- **Issue**: Hybrid system achieves only 32-48% recall vs 100% baseline
-- **Root Cause**: Limited coverage (50-65%) due to sparse parent nodes
-- **Impact**: Significantly lower accuracy despite 10-15x faster search
+### 🔴 **Problem 2: Early Hybrid Recall Performance (Legacy Measurement)**
+- **Historical Issue**: Initial hybrid prototype achieved only 32-52% recall vs ~90-100% baseline (small datasets) due to methodological gaps.
+- **Primary Root Cause**: Coverage loss & inconsistent semantics between parent selection (pure distance) and child expansion (graph traversal), plus query leakage (queries present in index build set) inflating baseline fairness.
+- **Current Status**: Fair evaluation now enforced (query exclusion), dual parent-child mapping modes (`approx` vs `brute`) added, and vectorized parent distance selection reduces inconsistency. Recall remains tunable; improving structural coverage (e.g. clustering parents) is tracked as future work.
 
 ## 🛠️ **Optimization Solutions Implemented**
 
@@ -80,20 +80,23 @@ neighbors = base_index.query(parent_vector, k=k_children, ef=50)
 | 5,000 vectors | ~80s | 39.2s | **2.0x faster** |
 
 ### 🏃 **Search Speed Improvements**
-| Dataset Size | Baseline Search | Hybrid Search | Speedup |
-|--------------|----------------|---------------|---------|
-| 1,000 vectors | 3.61ms | 0.28ms | **12.9x faster** |
-| 2,000 vectors | 6.36ms | 0.39ms | **16.3x faster** |
-| 5,000 vectors | 11.28ms | 0.79ms | **14.2x faster** |
+| Dataset Size | Baseline Search (ef tuned) | Hybrid Search (k_children≈1000, n_probe=10-15) | Speedup |
+|--------------|---------------------------|-----------------------------------------------|---------|
+| 1,000 vectors | 3.6ms | 0.28ms | **≈13x** |
+| 2,000 vectors | 6.3ms | 0.39ms | **≈16x** |
+| 5,000 vectors | 11.3ms | 0.79ms | **≈14x** |
 
 ## 🎯 **Recall vs Speed Trade-offs**
 
 ### 📈 **Current Performance Matrix**
 ```
 Configuration    | Build Time | Search Speed | Recall  | Use Case
-Original HNSW    | Slow       | Medium       | 100%    | High accuracy needed
-Optimized HNSW   | Medium     | Medium       | 100%    | Balanced requirements  
-Hybrid HNSW      | Medium     | Fast         | 32-48%  | Speed-critical apps
+Original HNSW    | Slow       | Medium       | 100%    | High accuracy (small scale)
+Optimized HNSW   | Medium     | Medium       | 100%    | Balanced accuracy/speed  
+Hybrid (early)   | Medium     | Fast         | 32-52%  | Speed-critical (low recall tolerance)
+Hybrid (improved roadmap) | Medium | Fast | 50-70%* | After parent strategy enhancements
+
+*Projected with clustering / coverage repair (planned).
 ```
 
 ### 🔧 **Recommended Configurations**
@@ -105,16 +108,21 @@ index = HNSW(m=16, ef_construction=100)
 search_params = {"ef": 200}
 ```
 
-#### For **Balanced Performance** (80%+ recall, <5ms search):
+#### For **Balanced Performance** (target ≥60% recall, <5ms search on mid-scale):
 ```python
-# Use improved hybrid with higher coverage
-hybrid = OptimizedHybridHNSW(k_children=1000, n_probe=15)
+from hnsw_hybrid_evaluation import HybridHNSWIndex
+hybrid = HybridHNSWIndex(k_children=1000, n_probe=15, parent_child_method='approx')
 ```
 
-#### For **Maximum Speed** (acceptable 40-60% recall):
+#### For **Maximum Speed** (acceptable 40-55% recall):
 ```python
-# Use current hybrid configuration
-hybrid = OptimizedHybridHNSW(k_children=500, n_probe=8)
+hybrid_fast = HybridHNSWIndex(k_children=500, n_probe=8, parent_child_method='approx')
+```
+
+#### For **Validation / Upper-Bound Mapping Quality**:
+```python
+hybrid_brute = HybridHNSWIndex(k_children=1000, n_probe=15, parent_child_method='brute')
+hybrid_brute.build_parent_child_mapping(method='brute')
 ```
 
 ## 🚀 **Future Optimization Strategies**
@@ -166,22 +174,26 @@ def build_mmap_index(large_dataset_file):
 ## 📋 **Implementation Recommendations**
 
 ### For **Current Production Use**:
-1. ✅ Use `OptimizedHybridHNSW` for speed-critical applications
-2. ✅ Use baseline HNSW with `ef_construction=100` for accuracy-critical applications  
-3. ✅ Monitor build times and adjust parameters based on dataset size
+1. ✅ Use `HybridHNSWIndex` for speed-critical scenarios (choose `approx` vs `brute` for mapping verification)
+2. ✅ Use baseline HNSW (m=16, ef_construction≈100-200) when near-perfect recall is mandatory
+3. ✅ Enforce fair evaluation (exclude query vectors via `split_query_set_from_dataset`)
+4. ✅ Monitor build & search latency; adjust `k_children` and `n_probe` for recall targets
 
 ### For **Future Scaling** (>100K vectors):
-1. 🔧 Implement K-means parent selection
-2. 🔧 Add multi-threading support
-3. 🔧 Use memory-mapped storage for very large datasets
-4. 🔧 Consider approximate algorithms (LSH, Random Projection Trees)
+1. 🔧 Introduce clustering-based parent extraction (e.g., K-means, k-medoids) to raise coverage
+2. 🔧 Add multi-threading (parallel distance batches & insertion)
+3. 🔧 Add memory-mapped datasets for > millions scale
+4. 🔧 Implement coverage repair ensuring each point assigned to ≥1 parent
+5. 🔧 Adaptive `n_probe` per query (distance distribution aware)
+6. 🔧 Optional third stage re-ranker (exact distance on narrowed candidate set)
 
 ## ✅ **Summary**
 
-The optimization efforts have successfully:
-- **Reduced build time by 2x** through parameter tuning and batch processing
-- **Achieved 10-15x search speedup** with acceptable recall trade-offs  
-- **Provided clear configuration guidelines** for different use cases
-- **Identified future optimization paths** for larger scale deployments
+The current optimization pass has:
+- **Reduced build time ~2x** via parameter tuning & batching
+- **Delivered 10-16x search speedups** under moderate recall settings
+- **Introduced fair evaluation tooling** to prevent query leakage
+- **Added dual parent-child mapping modes** to measure approximation gap
+- **Established a roadmap** for structural recall gains (clustering & coverage repair)
 
-The current implementation provides a good balance of performance and functionality for datasets up to 10K-50K vectors.
+Present implementation offers a tunable speed/recall balance for datasets up to ~50K (prototype); roadmap items target sustainable gains toward higher recall at scale.
