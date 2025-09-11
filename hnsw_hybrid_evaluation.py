@@ -28,26 +28,30 @@ class HybridHNSWIndex:
     """
 
     def __init__(self, distance_func=None, k_children: int = 1000, n_probe: int = 10, parent_child_method: str = 'approx'):
+        # Basic parameters
         self.distance_func = distance_func or self._l2_distance
         self.k_children = k_children
         self.n_probe = n_probe
         self.parent_child_method = parent_child_method
 
-        # Core data
+        # Core data containers
         self.base_index = None
-        self.parent_ids: List[int] = []
-        self.parent_child_map: Dict[int, List[int]] = {}
-        self.parent_vectors: Dict[int, np.ndarray] = {}
-        self._parent_matrix = None
-        self._parent_id_index: Dict[int, int] = {}
-        self.dataset: Dict[int, np.ndarray] = {}
+        self.parent_ids = []              # type: List[int]
+        self.parent_child_map = {}        # type: Dict[int, List[int]]
+        self.parent_vectors = {}          # type: Dict[int, np.ndarray]
+        self._parent_matrix = None        # cached parent vectors matrix
+        self._parent_id_index = {}        # parent id -> row index
+        self.dataset = {}                 # type: Dict[int, np.ndarray]
 
-        # Metrics
+        # Timing & metrics
         self.base_build_time = 0.0
         self.parent_extraction_time = 0.0
         self.mapping_build_time = 0.0
-        self.search_times: List[float] = []
-        self.candidate_sizes: List[int] = []
+        self.search_times = []            # type: List[float]
+        self.candidate_sizes = []         # type: List[int]
+
+        # Overlap stats cache (filled after mapping build)
+        self._overlap_stats = {}
 
     # --- Core helpers ---
     def _l2_distance(self, x, y):
@@ -86,15 +90,37 @@ class HybridHNSWIndex:
         print(f"Extracted {len(self.parent_ids)} parents in {self.parent_extraction_time:.2f}s (level={target_level})")
         return self.parent_ids
 
-    def build_parent_child_mapping(self, method: str = None, ef: int = 50, brute_force_batch: int = 4096):
+    def build_parent_child_mapping(
+        self,
+        method: str = None,
+        ef: int = 50,
+        brute_force_batch: int = 4096,
+        diversify_max_assignments: int = None,
+        repair_min_assignments: int = None,
+        repair_log_limit: int = 10,
+    ):
+        """Build mapping from parents to child candidate lists.
+
+        Args:
+            method: 'approx' (default) or 'brute'
+            ef: ef parameter when using approx method
+            brute_force_batch: batch size for brute force distance blocks
+            diversify_max_assignments: If set, greedy cap on how many parent lists a point can appear in during initial assignment (encourages breadth / reduces heavy overlap).
+            repair_min_assignments: If set, second pass ensures every point appears in at least this many parent lists (can exceed k_children for some parents to satisfy constraint).
+            repair_log_limit: Max number of individual repair additions to log (avoid spam).
+        """
         method = method or self.parent_child_method
         if method not in {"approx", "brute"}:
             raise ValueError("method must be 'approx' or 'brute'")
         if not self.parent_ids:
             raise ValueError("Parent nodes must be extracted first")
-        print(f"Building parent-child mapping method={method} k_children={self.k_children} parents={len(self.parent_ids)}")
+        print(
+            f"Building parent-child mapping method={method} k_children={self.k_children} "
+            f"parents={len(self.parent_ids)} diversify_max={diversify_max_assignments} repair_min={repair_min_assignments}"
+        )
         start = time.time()
         self.parent_child_map = {}
+        assignment_counts = defaultdict(int)  # global counts used for diversification
         data_ids = list(self.dataset.keys())
         if method == 'brute':
             data_matrix = np.stack([self.dataset[i] for i in data_ids], axis=0)
@@ -107,9 +133,10 @@ class HybridHNSWIndex:
                 eta = (total - i - 1) / rate if rate else 0
                 print(f"  [{i+1}/{total}] {pct:5.1f}% elapsed={elapsed:.1f}s eta={eta:.1f}s")
             pvec = self.dataset[pid]
+            # Raw candidate generation
             if method == 'approx':
                 neighbors = self.base_index.query(pvec, k=self.k_children + 1, ef=ef)
-                child_ids = [nid for nid, _ in neighbors if nid != pid][:self.k_children]
+                raw_child_ids = [nid for nid, _ in neighbors if nid != pid]
             else:  # brute
                 dists = []
                 for start_b in range(0, len(data_ids), brute_force_batch):
@@ -118,11 +145,156 @@ class HybridHNSWIndex:
                     batch_d = np.linalg.norm(batch_vecs - pvec, axis=1)
                     dists.extend(zip(batch_ids, batch_d))
                 dists.sort(key=lambda x: x[1])
-                child_ids = [cid for cid, _ in dists if cid != pid][:self.k_children]
+                raw_child_ids = [cid for cid, _ in dists if cid != pid]
+            # Diversification pass
+            if diversify_max_assignments is not None:
+                selected = []
+                skipped = []
+                for cid in raw_child_ids:
+                    if len(selected) >= self.k_children:
+                        break
+                    if assignment_counts[cid] < diversify_max_assignments:
+                        selected.append(cid)
+                        assignment_counts[cid] += 1
+                    else:
+                        skipped.append(cid)
+                if len(selected) < self.k_children:
+                    needed = self.k_children - len(selected)
+                    backfill = skipped[:needed]
+                    for cid in backfill:
+                        assignment_counts[cid] += 1
+                    selected.extend(backfill)
+                child_ids = selected
+            else:
+                child_ids = raw_child_ids[: self.k_children]
+                for cid in child_ids:
+                    assignment_counts[cid] += 1
             self.parent_child_map[pid] = child_ids
+
+        # Optional repair to guarantee minimum assignments per point
+        if repair_min_assignments is not None:
+            print(f"Repair phase: ensuring each point appears in >= {repair_min_assignments} parent lists...")
+            # Recompute assignment counts from final diversified lists (safer)
+            assignment_counts = defaultdict(int)
+            for plist in self.parent_child_map.values():
+                for cid in plist:
+                    assignment_counts[cid] += 1
+            deficit_points = [cid for cid in self.dataset.keys() if assignment_counts[cid] < repair_min_assignments]
+            print(f"  Points below threshold: {len(deficit_points)}")
+            # Parent vectors matrix for fast distance ranking
+            if self._parent_matrix is not None:
+                parent_matrix = self._parent_matrix
+            else:
+                parent_matrix = np.stack([self.dataset[pid] for pid in self.parent_ids], axis=0)
+            repair_logs = 0
+            for cid in deficit_points:
+                needed = repair_min_assignments - assignment_counts[cid]
+                if needed <= 0:
+                    continue
+                cvec = self.dataset[cid]
+                # Compute distances to all parents then add to nearest parents missing this child
+                dists = np.linalg.norm(parent_matrix - cvec, axis=1)
+                order = np.argsort(dists)
+                for idx in order:
+                    if needed <= 0:
+                        break
+                    pid = self.parent_ids[idx]
+                    plist = self.parent_child_map[pid]
+                    if cid in plist:
+                        continue
+                    plist.append(cid)  # allow overflow beyond k_children; keeps operation simple
+                    assignment_counts[cid] += 1
+                    needed -= 1
+                    if repair_logs < repair_log_limit:
+                        print(f"    Repaired child {cid} -> parent {pid}")
+                        repair_logs += 1
+            if repair_logs >= repair_log_limit:
+                print("    ... repair log truncated ...")
+            print("Repair phase complete")
+
         self.mapping_build_time = time.time() - start
+        # Compute and cache overlap stats
+        self._overlap_stats = self.mapping_overlap_stats()
         print(f"Parent-child mapping built in {self.mapping_build_time:.2f}s")
         return self.parent_child_map
+
+    def mapping_overlap_stats(self, sample_pairs: int = 200) -> Dict[str, float]:
+        """Compute overlap / redundancy statistics across parent child lists.
+
+        Args:
+            sample_pairs: Max number of random parent pairs to sample for Jaccard overlap
+        """
+        if not self.parent_child_map:
+            return {
+                'overlap_unique_fraction': 0.0,
+                'avg_assignment_count': 0.0,
+                'mean_jaccard_overlap': 0.0,
+                'median_jaccard_overlap': 0.0,
+                'multi_coverage_fraction': 0.0,
+                'max_assignment_count': 0.0,
+            }
+        parent_ids = list(self.parent_child_map.keys())
+        lists = [self.parent_child_map[pid] for pid in parent_ids]
+        total_assignments = sum(len(lst) for lst in lists)
+        assign_counts = defaultdict(int)
+        for lst in lists:
+            for cid in lst:
+                assign_counts[cid] += 1
+        unique_children = len(assign_counts)
+        dataset_size = len(self.dataset) if self.dataset else 0
+        multi_cov = sum(1 for v in assign_counts.values() if v > 1)
+        multi_coverage_fraction = multi_cov / unique_children if unique_children else 0.0
+        avg_assignment = total_assignments / unique_children if unique_children else 0.0
+        max_assignment = max(assign_counts.values()) if assign_counts else 0
+        # Jaccard sampling
+        import random
+        pair_indices = []
+        P = len(parent_ids)
+        if P <= 1:
+            mean_j = median_j = 0.0
+        else:
+            if P * (P - 1) // 2 <= sample_pairs:
+                # use all pairs
+                for i in range(P):
+                    for j in range(i + 1, P):
+                        pair_indices.append((i, j))
+            else:
+                seen = set()
+                while len(pair_indices) < sample_pairs:
+                    a = random.randrange(P)
+                    b = random.randrange(P)
+                    if a == b:
+                        continue
+                    if a > b:
+                        a, b = b, a
+                    if (a, b) in seen:
+                        continue
+                    seen.add((a, b))
+                    pair_indices.append((a, b))
+            jaccards = []
+            for a, b in pair_indices:
+                la = lists[a]
+                lb = lists[b]
+                sa = set(la)
+                sb = set(lb)
+                inter = len(sa & sb)
+                union = len(sa | sb)
+                j = inter / union if union else 0.0
+                jaccards.append(j)
+            if jaccards:
+                mean_j = float(np.mean(jaccards))
+                median_j = float(np.median(jaccards))
+            else:
+                mean_j = median_j = 0.0
+        stats = {
+            'overlap_unique_fraction': unique_children / dataset_size if dataset_size else 0.0,
+            'avg_assignment_count': avg_assignment,
+            'mean_jaccard_overlap': mean_j,
+            'median_jaccard_overlap': median_j,
+            'multi_coverage_fraction': multi_coverage_fraction,
+            'max_assignment_count': float(max_assignment),
+        }
+        return stats
 
     # --- Query Phase ---
     def _find_closest_parents(self, qvec: np.ndarray) -> List[int]:
@@ -181,14 +353,18 @@ class HybridHNSWIndex:
 
     def stats(self) -> Dict[str, float]:
         cov = self.coverage()
-        return {
+        merged = {
             'base_build_time': self.base_build_time,
             'parent_extraction_time': self.parent_extraction_time,
             'mapping_build_time': self.mapping_build_time,
             'avg_search_time': float(np.mean(self.search_times)) if self.search_times else 0.0,
             'avg_candidate_size': float(np.mean(self.candidate_sizes)) if self.candidate_sizes else 0.0,
-            **cov
+            **cov,
         }
+        # add overlap stats if available
+        if self._overlap_stats:
+            merged.update(self._overlap_stats)
+        return merged
 
 
 class RecallEvaluator:
@@ -245,10 +421,13 @@ class RecallEvaluator:
         print("Ground truth computation completed")
         return ground_truth
     
-    def evaluate_recall(self, 
-                       hybrid_index: HybridHNSWIndex, 
-                       query_vectors: Dict[int, np.ndarray], 
-                       k: int = 10) -> Dict[str, float]:
+    def evaluate_recall(self,
+                        hybrid_index: HybridHNSWIndex,
+                        query_vectors: Dict[int, np.ndarray],
+                        k: int = 10,
+                        progress_interval: int = 100,
+                        progress_callback=None,
+                        sample_query_ids: List[int] = None) -> Dict[str, float]:
         """
         Evaluate recall performance of the hybrid index.
         
@@ -256,15 +435,25 @@ class RecallEvaluator:
             hybrid_index: The hybrid HNSW index to evaluate
             query_vectors: Dictionary of query vectors
             k: Number of nearest neighbors to evaluate
+            progress_interval: Print partial stats every N queries
+            progress_callback: Optional callable(dict) invoked on progress
+            sample_query_ids: Optional subset of query IDs to evaluate
             
         Returns:
             Dictionary containing evaluation metrics
         """
-        print(f"Evaluating recall@{k} for {len(query_vectors)} queries...")
+        if sample_query_ids is not None:
+            eval_items = [(qid, query_vectors[qid]) for qid in sample_query_ids if qid in query_vectors]
+        else:
+            eval_items = list(query_vectors.items())
+        total_q = len(eval_items)
+        print(f"Evaluating recall@{k} for {total_q} queries (progress every {progress_interval})...")
         
         # Get ground truth
         if not self.ground_truth_cache:
-            ground_truth = self.compute_ground_truth(query_vectors, k)
+            # If sampling, ground truth still across full dataset for selected queries only
+            ground_truth_input = {qid: qv for qid, qv in eval_items}
+            ground_truth = self.compute_ground_truth(ground_truth_input, k)
         else:
             ground_truth = self.ground_truth_cache
         
@@ -272,9 +461,9 @@ class RecallEvaluator:
         total_possible = 0
         query_times = []
         
-        for i, (query_id, query_vector) in enumerate(query_vectors.items()):
-            if i % 1000 == 0:
-                print(f"Evaluating query {i+1}/{len(query_vectors)}")
+        for i, (query_id, query_vector) in enumerate(eval_items):
+            if i % 1000 == 0 and i > 0:
+                print(f"  Processing query {i+1}/{total_q}")
             
             # Get hybrid search results
             start_time = time.time()
@@ -290,6 +479,26 @@ class RecallEvaluator:
             correct = len(set(predicted_ids) & set(true_ids))
             total_correct += correct
             total_possible += k
+
+            if (i + 1) % progress_interval == 0 or (i + 1) == total_q:
+                partial_recall = total_correct / total_possible if total_possible else 0.0
+                avg_qt = float(np.mean(query_times)) if query_times else 0.0
+                progress_payload = {
+                    'phase': 'recall_eval',
+                    'processed_queries': i + 1,
+                    'total_queries': total_q,
+                    'partial_recall@k': partial_recall,
+                    'avg_query_time_so_far': avg_qt,
+                    'k': k,
+                    'k_children': hybrid_index.k_children,
+                    'n_probe': hybrid_index.n_probe
+                }
+                print(f"    [Progress] {i+1}/{total_q} partial_recall@{k}={partial_recall:.4f} avg_q_time={avg_qt:.6f}s")
+                if progress_callback:
+                    try:
+                        progress_callback(progress_payload)
+                    except Exception as e:  # noqa
+                        print(f"[WARN] progress_callback error: {e}")
         
         # Calculate metrics
         recall = total_correct / total_possible if total_possible > 0 else 0.0
@@ -298,7 +507,7 @@ class RecallEvaluator:
         results = {
             'recall@k': recall,
             'k': k,
-            'total_queries': len(query_vectors),
+            'total_queries': total_q,
             'avg_query_time': avg_query_time,
             'total_correct': total_correct,
             'total_possible': total_possible,
