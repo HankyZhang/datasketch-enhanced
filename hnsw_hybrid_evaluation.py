@@ -22,205 +22,173 @@ from datasketch.hnsw import HNSW
 
 
 class HybridHNSWIndex:
-    """
-    Hybrid HNSW implementation with two-stage parent-child retrieval system.
-    """
-    
-    def __init__(self, distance_func=None, k_children: int = 1000, n_probe: int = 10):
-        """Initialize the hybrid HNSW index.
+    """Hybrid HNSW implementation with two-stage parent-child retrieval system.
 
-        Args:
-            distance_func: Distance function for similarity computation
-            k_children: Number of child nodes per parent (default: 1000)
-            n_probe: Number of parent nodes to probe during search (default: 10)
-        """
+    Added instrumentation for build timings, coverage, candidate sizes.
+    """
+
+    def __init__(self, distance_func=None, k_children: int = 1000, n_probe: int = 10, parent_child_method: str = 'approx'):
         self.distance_func = distance_func or self._l2_distance
         self.k_children = k_children
         self.n_probe = n_probe
+        self.parent_child_method = parent_child_method
 
-        # Core data structures
+        # Core data
         self.base_index = None
-        self.parent_ids = []            # Parent node IDs
-        self.parent_child_map = {}      # parent_id -> children list
-        self.parent_vectors = {}
-        self._parent_matrix = None      # Cached parent vectors matrix
-        self._parent_id_index = {}      # parent_id -> row index
-        self.dataset = {}
+        self.parent_ids: List[int] = []
+        self.parent_child_map: Dict[int, List[int]] = {}
+        self.parent_vectors: Dict[int, np.ndarray] = {}
+        self._parent_matrix = None
+        self._parent_id_index: Dict[int, int] = {}
+        self.dataset: Dict[int, np.ndarray] = {}
 
-        # Performance tracking
-        self.build_time = 0.0
-        self.search_times = []
-        
+        # Metrics
+        self.base_build_time = 0.0
+        self.parent_extraction_time = 0.0
+        self.mapping_build_time = 0.0
+        self.search_times: List[float] = []
+        self.candidate_sizes: List[int] = []
+
+    # --- Core helpers ---
     def _l2_distance(self, x, y):
-        """Default L2 distance function."""
         return np.linalg.norm(x - y)
-    
+
+    # --- Build Phase ---
     def build_base_index(self, dataset: Dict[int, np.ndarray], m: int = 16, ef_construction: int = 200):
-        """
-        Build the base HNSW index from the dataset.
-        
-        Args:
-            dataset: Dictionary mapping node IDs to vectors
-            m: HNSW parameter for maximum connections per node
-            ef_construction: HNSW parameter for construction search width
-        """
         print(f"Building base HNSW index with {len(dataset)} vectors...")
-        start_time = time.time()
-        
+        start = time.time()
         self.dataset = dataset
-        self.base_index = HNSW(
-            distance_func=self.distance_func,
-            m=m,
-            ef_construction=ef_construction
-        )
-        
-        # Insert all vectors into base index
+        self.base_index = HNSW(distance_func=self.distance_func, m=m, ef_construction=ef_construction)
         self.base_index.update(dataset)
-        
-        build_time = time.time() - start_time
-        print(f"Base index built in {build_time:.2f} seconds")
-        
+        self.base_build_time = time.time() - start
+        print(f"Base index built in {self.base_build_time:.2f}s")
         return self.base_index
-    
+
     def extract_parent_nodes(self, target_level: int = 2):
-        """
-        Extract parent nodes from a specific level of the HNSW graph.
-        
-        Args:
-            target_level: Level to extract nodes from (default: 2)
-        """
-        print(f"Extracting parent nodes from level {target_level}...")
-        
         if self.base_index is None:
             raise ValueError("Base index must be built first")
-        
-        self.parent_ids = []
-        
-        # Check if target level exists
         if target_level >= len(self.base_index._graphs):
-            print(f"Warning: Level {target_level} does not exist. Available levels: 0-{len(self.base_index._graphs)-1}")
-            # Use the highest available level
             target_level = len(self.base_index._graphs) - 1
-            print(f"Using level {target_level} instead")
-        
+            print(f"Adjusted target_level to {target_level}")
         if target_level < 0:
             target_level = 0
-            print(f"Using level {target_level} (base level)")
-        
-        # Get nodes from the target level
-        if target_level < len(self.base_index._graphs):
-            layer = self.base_index._graphs[target_level]
-            self.parent_ids = list(layer._graph.keys())
-        
-        # Store parent vectors for quick access
-        self.parent_vectors = {parent_id: self.dataset[parent_id] for parent_id in self.parent_ids}
-        # Build cached matrix for vectorized distance in Stage 1
+        t0 = time.time()
+        layer = self.base_index._graphs[target_level]
+        self.parent_ids = list(layer._graph.keys())
+        self.parent_vectors = {pid: self.dataset[pid] for pid in self.parent_ids}
         if self.parent_ids:
             self._parent_matrix = np.stack([self.parent_vectors[pid] for pid in self.parent_ids], axis=0)
             self._parent_id_index = {pid: i for i, pid in enumerate(self.parent_ids)}
         else:
             self._parent_matrix = None
             self._parent_id_index = {}
-        
-        print(f"Extracted {len(self.parent_ids)} parent nodes from level {target_level}")
+        self.parent_extraction_time = time.time() - t0
+        print(f"Extracted {len(self.parent_ids)} parents in {self.parent_extraction_time:.2f}s (level={target_level})")
         return self.parent_ids
-    
-    def build_parent_child_mapping(self, method: str = "approx", ef: int = 50, brute_force_batch: int = 4096):
-        """Build the parent->children mapping.
 
-        Args:
-            method: 'approx' (default) uses HNSW queries; 'brute' computes exact distances.
-            ef: ef parameter for approximate queries (only for method='approx').
-            brute_force_batch: batching size for brute force distance computation.
-
-        Returns:
-            The parent_child_map dict.
-        """
-        print(f"Building parent-child mapping (method={method}, k_children={self.k_children})...")
-        start_time = time.time()
-        if not self.parent_ids:
-            raise ValueError("Parent nodes must be extracted first")
-        self.parent_child_map = {}
-
+    def build_parent_child_mapping(self, method: str = None, ef: int = 50, brute_force_batch: int = 4096):
+        method = method or self.parent_child_method
         if method not in {"approx", "brute"}:
             raise ValueError("method must be 'approx' or 'brute'")
-
-        dim = next(iter(self.dataset.values())).shape[0] if self.dataset else 0
+        if not self.parent_ids:
+            raise ValueError("Parent nodes must be extracted first")
+        print(f"Building parent-child mapping method={method} k_children={self.k_children} parents={len(self.parent_ids)}")
+        start = time.time()
+        self.parent_child_map = {}
         data_ids = list(self.dataset.keys())
-        if method == "brute":
+        if method == 'brute':
             data_matrix = np.stack([self.dataset[i] for i in data_ids], axis=0)
-
         total = len(self.parent_ids)
-        for idx, parent_id in enumerate(self.parent_ids):
-            if idx % max(1, total // 10) == 0 or idx == total - 1:
-                pct = (idx + 1) / total * 100
-                elapsed = time.time() - start_time
-                rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                eta = (total - idx - 1) / rate if rate > 0 else 0
-                print(f"  [{idx+1}/{total}] {pct:5.1f}% elapsed={elapsed:.1f}s eta={eta:.1f}s")
-
-            parent_vec = self.dataset[parent_id]
-
-            if method == "approx":
-                neighbors = self.base_index.query(parent_vec, k=self.k_children + 1, ef=ef)
-                child_ids = [nid for nid, _ in neighbors if nid != parent_id][:self.k_children]
+        for i, pid in enumerate(self.parent_ids):
+            if i % max(1, total // 10) == 0 or i == total - 1:
+                pct = (i + 1) / total * 100
+                elapsed = time.time() - start
+                rate = (i + 1) / elapsed if elapsed else 0
+                eta = (total - i - 1) / rate if rate else 0
+                print(f"  [{i+1}/{total}] {pct:5.1f}% elapsed={elapsed:.1f}s eta={eta:.1f}s")
+            pvec = self.dataset[pid]
+            if method == 'approx':
+                neighbors = self.base_index.query(pvec, k=self.k_children + 1, ef=ef)
+                child_ids = [nid for nid, _ in neighbors if nid != pid][:self.k_children]
             else:  # brute
-                # Compute distances to all in batches to limit memory
                 dists = []
-                for start in range(0, len(data_ids), brute_force_batch):
-                    batch_ids = data_ids[start:start + brute_force_batch]
-                    batch_vectors = data_matrix[start:start + brute_force_batch]
-                    # (batch, dim) vs (dim,) => (batch,)
-                    batch_d = np.linalg.norm(batch_vectors - parent_vec, axis=1)
+                for start_b in range(0, len(data_ids), brute_force_batch):
+                    batch_ids = data_ids[start_b:start_b + brute_force_batch]
+                    batch_vecs = data_matrix[start_b:start_b + brute_force_batch]
+                    batch_d = np.linalg.norm(batch_vecs - pvec, axis=1)
                     dists.extend(zip(batch_ids, batch_d))
                 dists.sort(key=lambda x: x[1])
-                child_ids = [i for i, _ in dists if i != parent_id][:self.k_children]
-
-            self.parent_child_map[parent_id] = child_ids
-
-        mapping_time = time.time() - start_time
-        print(f"Parent-child mapping built in {mapping_time:.2f} seconds (method={method})")
-        self.build_time = mapping_time
+                child_ids = [cid for cid, _ in dists if cid != pid][:self.k_children]
+            self.parent_child_map[pid] = child_ids
+        self.mapping_build_time = time.time() - start
+        print(f"Parent-child mapping built in {self.mapping_build_time:.2f}s")
         return self.parent_child_map
-    
-    def _find_closest_parents(self, query_vector: np.ndarray) -> List[int]:
-        """Vectorized Stage 1 parent selection."""
-        if self._parent_matrix is None or not len(self.parent_ids):
+
+    # --- Query Phase ---
+    def _find_closest_parents(self, qvec: np.ndarray) -> List[int]:
+        if self._parent_matrix is None or not self.parent_ids:
             return []
-        # Compute distances in a single vectorized op: shape (N_parents,)
-        diffs = self._parent_matrix - query_vector
+        diffs = self._parent_matrix - qvec
         dists = np.linalg.norm(diffs, axis=1)
-        # Partial argsort for efficiency
         if self.n_probe < len(dists):
-            top_idx = np.argpartition(dists, self.n_probe)[:self.n_probe]
-            # Order those top indices
-            top_idx = top_idx[np.argsort(dists[top_idx])]
+            idx = np.argpartition(dists, self.n_probe)[:self.n_probe]
+            idx = idx[np.argsort(dists[idx])]
         else:
-            top_idx = np.argsort(dists)
-        return [self.parent_ids[i] for i in top_idx[:self.n_probe]]
-    
+            idx = np.argsort(dists)
+        return [self.parent_ids[i] for i in idx[:self.n_probe]]
+
     def search(self, query_vector: np.ndarray, k: int = 10) -> List[Tuple[int, float]]:
-        """Two-stage search (vectorized Stage 1 & batch Stage 2)."""
-        start_time = time.time()
-        closest_parents = self._find_closest_parents(query_vector)
-        candidate_ids = set(closest_parents)
-        for parent_id in closest_parents:
-            candidate_ids.update(self.parent_child_map.get(parent_id, ()))
-        if not candidate_ids:
+        start = time.time()
+        parents = self._find_closest_parents(query_vector)
+        cids = set(parents)
+        for pid in parents:
+            cids.update(self.parent_child_map.get(pid, ()))
+        if not cids:
             return []
-        candidates = list(candidate_ids)
-        cand_matrix = np.stack([self.dataset[cid] for cid in candidates], axis=0)
-        dists = np.linalg.norm(cand_matrix - query_vector, axis=1)
+        candidates = list(cids)
+        mat = np.stack([self.dataset[c] for c in candidates], axis=0)
+        dists = np.linalg.norm(mat - query_vector, axis=1)
         if k < len(dists):
-            top_idx = np.argpartition(dists, k)[:k]
-            # Sort selected
-            order = np.argsort(dists[top_idx])
-            top_idx = top_idx[order]
+            top = np.argpartition(dists, k)[:k]
+            order = np.argsort(dists[top])
+            top = top[order]
         else:
-            top_idx = np.argsort(dists)
-        results = [(candidates[i], float(dists[i])) for i in top_idx[:k]]
-        self.search_times.append(time.time() - start_time)
+            top = np.argsort(dists)
+        results = [(candidates[i], float(dists[i])) for i in top[:k]]
+        self.search_times.append(time.time() - start)
+        self.candidate_sizes.append(len(cids))
         return results
+
+    # --- Metrics ---
+    def coverage(self) -> Dict[str, float]:
+        if not self.dataset or not self.parent_child_map:
+            return {
+                'coverage_fraction': 0.0,
+                'covered_points': 0,
+                'total_points': len(self.dataset),
+                'parent_count': len(self.parent_ids)
+            }
+        covered: Set[int] = set()
+        for children in self.parent_child_map.values():
+            covered.update(children)
+        total = len(self.dataset)
+        return {
+            'coverage_fraction': len(covered) / total if total else 0.0,
+            'covered_points': len(covered),
+            'total_points': total,
+            'parent_count': len(self.parent_ids)
+        }
+
+    def stats(self) -> Dict[str, float]:
+        cov = self.coverage()
+        return {
+            'base_build_time': self.base_build_time,
+            'parent_extraction_time': self.parent_extraction_time,
+            'mapping_build_time': self.mapping_build_time,
+            'avg_search_time': float(np.mean(self.search_times)) if self.search_times else 0.0,
+            'avg_candidate_size': float(np.mean(self.candidate_sizes)) if self.candidate_sizes else 0.0,
+            **cov
+        }
 
 
 class RecallEvaluator:
