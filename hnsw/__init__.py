@@ -28,6 +28,7 @@ DataSketch Enhanced - HNSW专版
 """
 
 from .version import __version__
+# Standard HNSW Implementation
 from .hnsw import HNSW
 
 __all__ = ['HNSW', '__version__']
