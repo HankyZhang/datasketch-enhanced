@@ -1,20 +1,20 @@
-# Experiment Report: Hybrid HNSW Coverage & Recall Progression (2025-09-12)
+# 实验报告：Hybrid HNSW 覆盖率与召回率演进（2025-09-12）
 
-## 1. Goal
-Establish the relationship between mapping_ef (parent->child approximate mapping breadth), coverage_fraction, and recall for the current parent-centric hybrid design; then baseline a high mapping_ef configuration prior to applying structural repair (coverage=1) in the next action.
+## 1. 目标 (Goal)
+建立当前“父节点中心”混合设计中 mapping_ef（父->子近似映射宽度）、coverage_fraction（覆盖率）与 recall 的定量关系；并在应用结构修复（repair，目标覆盖率=1）前建立一个高 mapping_ef 的基线。
 
-## 2. Key Concepts
-- coverage_fraction: Fraction of indexed points that appear in at least one parent child list.
-- recall@k: Fraction of true top-k neighbors recovered after union + re-rank.
-- parent-centric limitation: If coverage < 1 and recall within covered region is ~1, then recall ≈ coverage.
-- mapping_ef: Controls breadth of approximate search used while assigning children to parents.
-- k_children: Capacity limit per parent list; ineffective when lists are far from full (low fill_ratio).
+## 2. 核心概念 (Key Concepts)
+- coverage_fraction：被至少一个父节点子列表包含的索引点占全部索引点的比例。
+- recall@k：在 union + rerank 后，真实 top-k 邻居被找回的比例。
+- parent-centric 限制：若 coverage < 1 且被覆盖区域内近似“全部可命中”，则 recall ≈ coverage。
+- mapping_ef：构建父->子映射时的近似搜索宽度（越大尝试关联更多候选子节点）。
+- k_children：每个父节点子列表的容量上限；在列表极度稀疏（fill_ratio 低）时增大无效。
 
-## 3. mapping_ef Sweep (UNOPTIMIZED)
-Parameters: dataset=5000 (4500 indexed + 500 queries), dim=128, k=10, m=16, ef_construction=400, parent_level=2, k_children=1000, n_probe=12.
-Each row rebuilds the mapping with a different mapping_ef; base index & parents reused.
+## 3. mapping_ef 扫描（未优化 UNOPTIMIZED）
+参数：dataset=5000（索引 4500 + 查询 500），dim=128，k=10，m=16，ef_construction=400，parent_level=2，k_children=1000，n_probe=12。
+每一行使用不同 mapping_ef 重建父->子映射（复用底层索引与父集合）。
 
-Observed (abridged):
+观察（节选）：
 ```
 mapping_ef | coverage  | recall@10 | fill_ratio | avg_assignment_count
 ---------: | --------: | --------: | ---------: | ------------------:
@@ -25,12 +25,12 @@ mapping_ef | coverage  | recall@10 | fill_ratio | avg_assignment_count
       160  | 0.3780    | 0.3788    | 0.1590     | 1.03
       200  | 0.4491    | 0.4496    | 0.1990     | 1.03
 ```
-Interpretation: recall tracks coverage nearly 1:1; lists are extremely sparse (fill_ratio < 0.2) and redundancy minimal (avg_assignment_count ≈1). Increasing k_children cannot help until coverage saturates.
+解释：recall 近乎 1:1 跟随 coverage；列表极度稀疏（fill_ratio < 0.2），冗余几乎不存在（avg_assignment_count≈1）。在覆盖尚未接近饱和前，提升 k_children 不起作用。
 
-## 4. High mapping_ef Unoptimized Run
-Parameters: dataset=5000 (4500 indexed + 500 queries), dim=128, k=10, m=16, ef_construction=400, parent_level=2, mapping_ef=400, k_children=400, n_probe ∈ {5,8,10,12}.
+## 4. 高 mapping_ef 未优化运行 (High mapping_ef Unoptimized)
+参数：dataset=5000（4500 + 500），dim=128，k=10，m=16，ef_construction=400，parent_level=2，mapping_ef=400，k_children=400，n_probe ∈ {5,8,10,12}。
 
-CSV excerpt (`unoptimized_5k_efc400_kch400_map400.csv`):
+CSV 摘录（`unoptimized_5k_efc400_kch400_map400.csv`）：
 ```
 n_probe | recall@10 | coverage | avg_candidate_size | avg_query_time_ms
 ------: | --------: | -------: | -----------------: | ----------------:
@@ -39,46 +39,46 @@ n_probe | recall@10 | coverage | avg_candidate_size | avg_query_time_ms
     10  | 0.6986    | 0.774    | 2712.7             | 2.872
     12  | 0.7364    | 0.774    | 3018.8             | 3.366
 ```
-Notes:
-- Coverage plateaus at 0.774 despite larger mapping_ef because parent_count=16 limits reach; remaining 22.6% of points are never candidate-eligible.
-- avg_assignment_count ~1.83 indicates some modest redundancy emerging, but still far from densely covered.
-- Candidate size grows roughly linearly with n_probe as we union more sparse lists.
+说明：
+1. 虽然 mapping_ef=400，但 coverage 停在 0.774，根因是 parent_count=16 限制了可触达范围；剩余 22.6% 永不进入候选。
+2. avg_assignment_count≈1.83 显示适度冗余开始出现，但距离“高重叠”很远。
+3. 随 n_probe 增加，候选规模近似线性增长（合并更多稀疏列表）。
 
-## 5. Findings So Far
-1. Coverage is the dominant determinant of recall; improving coverage directly increases recall until near-full coverage.
-2. mapping_ef scaling exhibits diminishing returns once reachable region (given parent set) is saturated.
-3. Parent layer sparsity (only 16 parents) creates a structural ceiling at coverage≈0.774 in the current configuration.
-4. Redundancy (multi_coverage_fraction≈0.536) begins to rise at higher mapping_ef, enabling recall to slightly exceed a pure 1:1 mapping with coverage in earlier regime, but not enough to break the coverage ceiling.
+## 5. 当前阶段发现 (Findings So Far)
+1. 覆盖率是主导召回的首要因素；提升覆盖直接线性抬升召回直到接近满覆盖。
+2. 当既定父集合的可触达区域饱和后，继续增大 mapping_ef 收益递减。
+3. 父层稀疏（仅 16 个父）导致结构上限 coverage≈0.774。
+4. 冗余（multi_coverage_fraction≈0.536）在高 mapping_ef 时上升，使召回略微超出早期“纯线性”但不足以突破覆盖上限。
 
-## 6. Next Planned Action (Pending)
-Run a repair-enabled mapping (repair_min_assignments=1) with the same base parameters (efc=400, mapping_ef=400, k_children=400, parent_level=2) to force every point into at least one parent list (target coverage=1.0) and measure:
-- New recall@10 vs n_probe (expect substantial uplift approaching pure HNSW upper bound when n_probe large).
-- Candidate size inflation and multi_coverage_fraction shift.
-- Impact on avg_query_time.
+## 6. 下一步计划（当时 Pending）
+运行 repair（repair_min_assignments=1），在同样参数下强制所有点至少出现在一个父列表中（目标 coverage=1.0），并度量：
+- recall@10 vs n_probe（预期大幅上升，接近纯 HNSW 上界）
+- 候选规模膨胀与 multi_coverage_fraction 变化
+- 平均查询时间影响
 
-Planned output file: `unoptimized_5k_efc400_kch400_map400_repair.csv`.
+计划输出文件：`unoptimized_5k_efc400_kch400_map400_repair.csv`。
 
-## 7. Anticipated Metrics to Capture in Repair Run
-- coverage_fraction (should reach 1.0)
-- recall@k across n_probe {5,8,10,12}
-- avg_candidate_size growth vs unoptimized baseline
-- multi_coverage_fraction, avg_assignment_count (expect higher)
-- recall gain per incremental candidate increase (efficiency curve)
+## 7. 预计需要记录的修复指标 (Anticipated Metrics)
+- coverage_fraction（应达到 1.0）
+- 各 n_probe {5,8,10,12} 的 recall@k
+- 与未修复基线相比的 avg_candidate_size 增长
+- multi_coverage_fraction 与 avg_assignment_count（预期更高或结构性变化）
+- 单位候选增量带来的召回收益（效率曲线）
 
-## 8. Recommendations (Pre-Repair)
-Short term:
-- Execute repair run and update this report with before/after comparison table.
-- Add plot (coverage vs recall) using sweep data.
-Medium term:
-- Evaluate parent_level=1 vs 2 vs 3 to trade off parent_count vs per-parent list size.
-- Introduce candidate truncation (limit union to top-L by parent-local distance or global pruning) to cap candidate explosion post-repair.
-- Explore diversification (cap assignments) AFTER repair to curb redundancy while retaining coverage.
+## 8. 修复前建议 (Recommendations Pre-Repair)
+短期：
+- 执行 repair 并加入前后对比表。
+- 基于 sweep 数据添加 coverage vs recall 图。
+中期：
+- 比较 parent_level=1/2/3：父节点数 vs 列表大小 vs 构建时间。
+- 引入候选截断策略（per-parent top-L 或全局裁剪）抑制修复后的候选膨胀。
+- 在 repair 之后再尝试 diversification（限制重复分配）。
 
-## 9. Appendix: Rationale for Repair
-Repair ensures no point is permanently unreachable, decoupling recall from initial mapping approximate search misses. This transforms the bottleneck from structural coverage to candidate control and re-ranking efficiency, enabling fine-grained latency/recall trade-offs via n_probe and candidate pruning strategies.
+## 9. 附录：为什么需要 Repair (Rationale)
+Repair 确保没有点永久不可达；把瓶颈从“结构覆盖不足”转移到“候选控制与重排效率”，为后续通过 n_probe 与候选剪枝进行精细延迟/召回权衡奠定前提。
 
 ---
-Report authored automatically (2025-09-12). Next step: run repair experiment and append Section 10 with results.
+本报告自动生成（2025-09-12）。随后已执行修复实验并追加第 10 节结果。
 
 ## 10. 覆盖修复（repair）对比实验（与未修复同参数直接比较）
 
@@ -107,13 +107,13 @@ n_probe | 未修复 recall@10 | 修复 recall@10 | 覆盖(未/修) | 候选数�
 4. 由于重复覆盖减少，单点平均被探测概率分布更均匀；在相同 n_probe 下更容易命中其唯一父列表，召回提升幅度在中高 n_probe（8/10/12）进一步放大。
 5. 查询时间的增加与候选数线性相关（毫秒级增长），保持可控：n_probe=12 时 ~3.37ms -> ~4.68ms。
 
-### 10.4 结论（中文摘要）
+### 10.4 结论
 repair_min_assignments=1 在当前 parent_count=13, mapping_ef=400 的结构下，将结构性瓶颈（覆盖<1）彻底消除，召回从“受 coverage 限制的线性段”跃迁到“接近完全检索”区间，实现 0.74→0.98 的显著提升；代价是候选数 ~1.4x 和 查询时间 ~1.4x 的温和增长。该性价比优于继续盲目增大 mapping_ef 或 k_children。下一步可在修复基础上引入：
 - 轻度 diversification 限制过多集中到少数父节点的 late redundancy；
 - 候选截断（全局或 per-parent top-L）控制高 n_probe 下的候选线性膨胀；
 - parent_level 调整或多层混合，提升初始覆盖同时减少 repair 工作量。
 
-### 10.5 后续计划（中文）
+### 10.5 后续计划
 1. 在 repair 基础上加入 diversification（如 diversify_max_assignments≈3–4）对比其对 multi_coverage_fraction 与 recall 的影响。
 2. 设计候选剪枝策略：按父内局部距离截断 / 全局距离 heap 维护，观察 recall-候选曲线。
 3. parent_level=1/2/3 对比：父节点数 vs 覆盖 vs 构建时间三维权衡。
