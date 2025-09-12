@@ -54,7 +54,8 @@ setup(
         'Programming Language :: Python :: 3.11',
     ],
     keywords='hnsw similarity-search machine-learning chinese-docs',
-    packages=find_packages(include=['datasketch*']),
+    packages=find_packages(include=['datasketch*', 'src*']),
+    package_dir={'': '.'},
     install_requires=[
         'numpy>=1.11',
     ],

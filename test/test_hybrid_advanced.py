@@ -21,6 +21,11 @@ import numpy as np
 # Ensure local module import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'hnsw_core'))
 from hnsw import HNSW  # type: ignore
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'hnsw'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'benchmarks'))
+
 from hnsw_hybrid import (
     HNSWHybrid,
     HNSWEvaluator,

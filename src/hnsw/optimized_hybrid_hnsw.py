@@ -11,6 +11,9 @@ import time
 import numpy as np
 from typing import Dict, List, Tuple
 from datasketch import HNSW
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'benchmarks'))
 from hnsw_hybrid_evaluation import generate_synthetic_dataset, create_query_set
 
 # DEPRECATED: Functionality merged into hnsw_hybrid_evaluation.HybridHNSWIndex
