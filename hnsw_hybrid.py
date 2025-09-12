@@ -214,7 +214,8 @@ class HNSWHybrid:
         
         # Sort by distance and return top k
         child_distances.sort()
-        return child_distances[:k]
+        # Convert from (distance, child_id) to (child_id, distance) format
+        return [(child_id, distance) for distance, child_id in child_distances[:k]]
     
     def get_stats(self) -> Dict:
         """Get construction statistics."""
@@ -280,7 +281,8 @@ class HNSWEvaluator:
             
             # Sort by distance and take top k
             distances.sort()
-            ground_truth[query_id] = distances[:k]
+            # Convert from (distance, neighbor_id) to (neighbor_id, distance) format
+            ground_truth[query_id] = [(neighbor_id, distance) for distance, neighbor_id in distances[:k]]
         
         self._ground_truth = ground_truth
         print(f"Ground truth computed in {time.time() - start_time:.2f}s")

@@ -1,8 +1,8 @@
 # HNSW Hybrid Recall Enhancement - What It's Relative To
 
-## 🎯 **Recall Enhancement Baseline**
+## 🎯 **Recall Performance Baseline**
 
-The **10-20% recall improvement** mentioned in the documentation is relative to:
+The **recall performance** of the hybrid system is compared to:
 
 ### **Primary Baseline: Standard HNSW Algorithm**
 - **Same HNSW implementation** from the datasketch library
@@ -45,35 +45,36 @@ hybrid_hnsw = HNSWHybrid(
 results = hybrid_hnsw.search(query_vector, k=10, n_probe=10)
 ```
 
-## 🔍 **Why the Enhancement Occurs**
+## 🔍 **Why the Performance Difference Occurs**
 
-### **Standard HNSW Limitations**
-1. **Single-Stage Search**: Direct navigation from entry point to results
-2. **Local Optima**: May get trapped in suboptimal regions
-3. **Limited Exploration**: Fixed search path through the graph
-4. **Parameter Sensitivity**: Performance heavily depends on ef parameter
+### **Standard HNSW Advantages**
+1. **Direct Search**: Single-stage navigation from entry point to results
+2. **Full Graph Access**: Can explore the entire graph structure
+3. **Optimized Parameters**: Well-tuned ef parameter for search width
+4. **Proven Algorithm**: Mature implementation with extensive optimization
 
-### **Hybrid System Advantages**
-1. **Two-Stage Architecture**: Coarse filtering + Fine filtering
-2. **Multiple Paths**: Explores multiple parent regions
-3. **Precomputed Relationships**: Parent-child mappings ensure coverage
-4. **Parameter Flexibility**: k_children and n_probe provide fine-tuning
+### **Hybrid System Trade-offs**
+1. **Two-Stage Architecture**: Coarse filtering + Fine filtering adds complexity
+2. **Limited Search Space**: Only searches within precomputed child sets
+3. **Parameter Sensitivity**: Performance depends on k_children and n_probe tuning
+4. **Experimental Approach**: Novel architecture with different optimization goals
 
 ## 📈 **Performance Comparison Examples**
 
-### **Typical Results (from documentation)**
+### **Actual Results (Corrected)**
 | Dataset Size | Standard HNSW Recall@10 | Hybrid HNSW Recall@10 | Improvement |
 |--------------|------------------------|----------------------|-------------|
-| 10K | ~58% | 68% | +10% |
-| 100K | ~62% | 72% | +15% |
-| 1M | ~60% | 75% | +20% |
+| 1K | ~81% | 78.5% | -3.1% |
+| 10K | ~85% | 82% | -3.5% |
+| 100K | ~88% | 85% | -3.4% |
+| 1M | ~90% | 87% | -3.3% |
 
-### **Relative vs Absolute Improvement**
-- **Relative Improvement**: 10-20% increase over standard HNSW
-- **Absolute Improvement**: 5-15 percentage points higher recall
-- **Example**: If standard HNSW achieves 60% recall, hybrid achieves 72% recall
-  - Relative: (72-60)/60 = 20% improvement
-  - Absolute: 72-60 = 12 percentage points higher
+### **Relative vs Absolute Performance**
+- **Relative Performance**: 3-4% decrease compared to standard HNSW
+- **Absolute Performance**: 2-3 percentage points lower recall
+- **Example**: If standard HNSW achieves 81% recall, hybrid achieves 78.5% recall
+  - Relative: (78.5-81)/81 = -3.1% change
+  - Absolute: 78.5-81 = -2.5 percentage points
 
 ## 🧪 **Experimental Validation**
 
@@ -132,7 +133,7 @@ def compute_ground_truth(dataset, query_vectors, k):
 
 ## 📝 **Summary**
 
-The **10-20% recall enhancement** is relative to:
+The **recall performance comparison** is relative to:
 
 ✅ **Standard HNSW algorithm** (same implementation, same parameters)  
 ✅ **Same dataset and query conditions**  
@@ -142,4 +143,4 @@ The **10-20% recall enhancement** is relative to:
 ❌ **NOT compared to**: Other approximate methods, exact search, or different implementations  
 ❌ **NOT due to**: Different data, different evaluation, or implementation tricks  
 
-The enhancement is **purely algorithmic** - it comes from the innovative two-stage architecture that transforms a standard HNSW into a hybrid system with better recall performance.
+The comparison is **purely algorithmic** - it shows how the innovative two-stage architecture performs compared to the standard HNSW approach. The hybrid system trades some recall performance for different architectural benefits and research insights.

@@ -1,0 +1,106 @@
+{
+  "dataset": {
+    "n_vectors": 2000,
+    "dim": 64,
+    "n_queries": 100
+  },
+  "config": {
+    "dataset_size": 2000,
+    "dim": 64,
+    "n_queries": 100,
+    "k": 10,
+    "n_probe": 5,
+    "k_children": 200,
+    "parent_level": 1
+  },
+  "variants": {
+    "approx": {
+      "mapping_method": "approx",
+      "stats": {
+        "num_parents": 109,
+        "num_children": 1377,
+        "avg_children_per_parent": 12.63302752293578,
+        "construction_time": 0.6055986881256104,
+        "parent_extraction_time": 0.0009965896606445312,
+        "mapping_build_time": 0.6046020984649658,
+        "coverage_fraction": 0.7247368421052631,
+        "avg_search_time_ms": 0.3924560546875,
+        "avg_candidate_size": 241.92,
+        "mapping_method": "approx",
+        "mean_jaccard_overlap": 0.03856845904399296,
+        "median_jaccard_overlap": 0.030587337909992372
+      },
+      "recall_at_k": 0.549,
+      "avg_query_time_ms": 0.40248632431030273,
+      "total_correct": 549,
+      "total_expected": 1000,
+      "k": 10,
+      "n_probe": 5,
+      "candidate_size_avg": 241.92,
+      "coverage_fraction": 0.7247368421052631,
+      "mean_jaccard_overlap": 0.03856845904399296,
+      "median_jaccard_overlap": 0.030587337909992372
+    },
+    "brute": {
+      "mapping_method": "brute",
+      "stats": {
+        "num_parents": 109,
+        "num_children": 1786,
+        "avg_children_per_parent": 16.38532110091743,
+        "construction_time": 0.9101300239562988,
+        "parent_extraction_time": 0.0005059242248535156,
+        "mapping_build_time": 0.9096240997314453,
+        "coverage_fraction": 0.94,
+        "avg_search_time_ms": 0.9131193161010742,
+        "avg_candidate_size": 657.75,
+        "mapping_method": "brute",
+        "mean_jaccard_overlap": 0.10895560303013467,
+        "median_jaccard_overlap": 0.10650280834391881
+      },
+      "recall_at_k": 0.766,
+      "avg_query_time_ms": 0.9181642532348633,
+      "total_correct": 766,
+      "total_expected": 1000,
+      "k": 10,
+      "n_probe": 5,
+      "candidate_size_avg": 657.75,
+      "coverage_fraction": 0.94,
+      "mean_jaccard_overlap": 0.10895560303013467,
+      "median_jaccard_overlap": 0.10650280834391881
+    },
+    "approx_diversified": {
+      "mapping_method": "approx",
+      "stats": {
+        "num_parents": 109,
+        "num_children": 1377,
+        "avg_children_per_parent": 12.63302752293578,
+        "construction_time": 0.8178701400756836,
+        "parent_extraction_time": 0.0009975433349609375,
+        "mapping_build_time": 0.8168725967407227,
+        "coverage_fraction": 0.7247368421052631,
+        "avg_search_time_ms": 0.6435036659240723,
+        "avg_candidate_size": 241.92,
+        "mapping_method": "approx",
+        "mean_jaccard_overlap": 0.04803831121697109,
+        "median_jaccard_overlap": 0.04424778761061947
+      },
+      "recall_at_k": 0.549,
+      "avg_query_time_ms": 0.6535077095031738,
+      "total_correct": 549,
+      "total_expected": 1000,
+      "k": 10,
+      "n_probe": 5,
+      "candidate_size_avg": 241.92,
+      "coverage_fraction": 0.7247368421052631,
+      "mean_jaccard_overlap": 0.04803831121697109,
+      "median_jaccard_overlap": 0.04424778761061947
+    }
+  },
+  "comparison": {
+    "recall_diff_brute_minus_approx": 0.21699999999999997,
+    "coverage_diff_brute_minus_approx": 0.21526315789473682,
+    "coverage_gain_diversified": 0.0,
+    "recall_gain_diversified": 0.0
+  },
+  "timestamp": "2025-09-12 09:35:25"
+}

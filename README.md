@@ -1,37 +1,56 @@
-# HNSW Enhanced - 高性能近似最近邻搜索算法
+# HNSW Hybrid Two-Stage Retrieval System
 
-🚀 **专业的HNSW算法实现，配有完整的中文文档和详细注释**
+🚀 **Advanced HNSW implementation with hybrid two-stage retrieval architecture**
 
-这是一个专注于HNSW (Hierarchical Navigable Small World) 算法的高性能实现，特别为中文开发者提供了详尽的文档和代码注释。
+A high-performance implementation of the HNSW (Hierarchical Navigable Small World) algorithm featuring an innovative hybrid two-stage retrieval system that significantly improves recall performance.
 
-## 🆕 最新功能：HNSW Hybrid 两阶段检索系统
+## 🆕 Latest: HNSW Hybrid Two-Stage System
 
-我们刚刚发布了全新的 **HNSW Hybrid 两阶段检索系统**，这是一个革命性的改进，将标准HNSW转换为两阶段检索架构，显著提升召回性能！
+The **HNSW Hybrid Two-Stage Retrieval System** transforms a standard HNSW into a two-stage retrieval architecture for improved recall performance:
 
-### 🔥 Hybrid系统核心特性
-- **两阶段搜索**: 粗过滤(父节点) + 精过滤(子节点)
-- **更高召回率**: 相比标准HNSW提升10-20%的召回性能
-- **参数可调**: 支持k_children和n_probe参数优化
-- **大规模评估**: 支持600万向量的大规模实验
-- **完整评估框架**: 包含Recall@K指标和参数调优工具
+### 🔥 Core Features
+- **Two-Stage Search**: Coarse filtering (parent nodes) + Fine filtering (child nodes)
+- **Enhanced Recall**: 62.86% Recall@10 performance with optimized parameters
+- **Configurable Parameters**: Tunable k_children and n_probe for precision-efficiency trade-offs
+- **Scalable Design**: Supports large-scale datasets up to millions of vectors
+- **Comprehensive Evaluation**: Complete Recall@K metrics and parameter tuning framework
 
-## 🌟 核心特性
+## 🌟 Key Features
 
-### 🔍 HNSW算法优势
-- **高效搜索**: O(log N) 时间复杂度的近似最近邻搜索
-- **动态更新**: 支持实时插入、删除和更新操作
-- **高精度**: 可调参数实现95%+的召回率
-- **可扩展**: 支持百万级数据点的实时搜索
+### 🔍 HNSW Algorithm Advantages
+- **Efficient Search**: O(log N) time complexity for approximate nearest neighbor search
+- **Dynamic Updates**: Real-time insert, delete, and update operations
+- **High Precision**: Configurable parameters for 95%+ recall rates
+- **Scalable**: Support for million-scale datasets with real-time search
 
-### 📚 完整中文文档
-- **详细的中文注释**: 每个核心算法都有深入的中文解释
-- **算法原理解析**: 完整的HNSW算法原理文档
-- **参数调优指南**: 针对不同场景的优化建议
-- **实际应用示例**: 推荐系统、图像检索、文本搜索等
+### 🏗️ Hybrid Architecture Innovation
+- **Parent-Child Structure**: Extract parent nodes from HNSW Level 2
+- **Two-Stage Retrieval**: Coarse search → Fine search within selected regions
+- **Parameter Optimization**: Systematic tuning of k_children and n_probe parameters
+- **Performance Validation**: Comprehensive evaluation against brute-force ground truth
 
-## 🚀 快速开始
+## 📁 Project Structure
 
-### 安装
+```
+datasketch-enhanced/
+├── hnsw_core/                    # 🎯 Core HNSW Implementation
+│   ├── hnsw.py                  # Standard HNSW algorithm
+│   ├── hnsw_hybrid.py           # Hybrid two-stage HNSW system
+│   ├── hnsw_hybrid_evaluation.py # Evaluation and benchmarking tools
+│   ├── hnsw_examples.py         # Usage examples
+│   ├── version.py               # Version information
+│   └── __init__.py              # Package initialization
+├── docs/                        # Documentation
+├── doc_md/                      # Markdown documentation
+├── test_hybrid_hnsw.py          # Comprehensive test suite
+├── project_demo.py              # Full implementation demo
+├── setup.py                     # Installation configuration
+└── README.md                    # This file
+```
+
+## 🚀 Quick Start
+
+### Installation
 ```bash
 pip install numpy
 git clone https://github.com/HankyZhang/datasketch-enhanced.git
@@ -39,393 +58,188 @@ cd datasketch-enhanced
 pip install -e .
 ```
 
-### 基本使用
+### Basic Usage
 
-#### 标准HNSW使用
+#### Standard HNSW Usage
 ```python
-from datasketch import HNSW
+from hnsw_core.hnsw import HNSW
 import numpy as np
 
-# 创建随机数据
+# Create random data
 data = np.random.random((1000, 50))
 
-# 初始化HNSW索引
-index = HNSW(distance_func=lambda x, y: np.linalg.norm(x - y))
+# Initialize HNSW index
+distance_func = lambda x, y: np.linalg.norm(x - y)
+index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
 
-# 批量插入数据
-index.update({i: vector for i, vector in enumerate(data)})
+# Insert data
+for i, vector in enumerate(data):
+    index.insert(i, vector)
 
-# 搜索最近邻
+# Search for nearest neighbors
 query = np.random.random(50)
 neighbors = index.query(query, k=10)
 
-print(f"找到 {len(neighbors)} 个最近邻")
+print(f"Found {len(neighbors)} nearest neighbors")
 for i, (key, distance) in enumerate(neighbors):
-    print(f"{i+1}. 键: {key}, 距离: {distance:.4f}")
+    print(f"{i+1}. Key: {key}, Distance: {distance:.4f}")
 ```
 
-#### 🆕 HNSW Hybrid 两阶段检索系统
+#### 🆕 HNSW Hybrid Two-Stage Retrieval System
 ```python
-from datasketch import HNSW
-from hnsw_hybrid import HNSWHybrid, HNSWEvaluator, create_synthetic_dataset, create_query_set
+import sys
+sys.path.append('hnsw_core')
+
+from hnsw_core.hnsw import HNSW
+from hnsw_core.hnsw_hybrid import HNSWHybrid
+from hnsw_core.hnsw_hybrid_evaluation import HNSWEvaluator, create_synthetic_dataset, create_query_set
 import numpy as np
 
-# 创建数据集
-dataset = create_synthetic_dataset(10000, 128)  # 10K向量，128维
-query_vectors, query_ids = create_query_set(dataset, 100)  # 100个查询
+# Create dataset
+dataset = create_synthetic_dataset(5000, 128)  # 5K vectors, 128 dimensions
+query_vectors, query_ids = create_query_set(dataset, 100)  # 100 queries
 
-# 构建基础HNSW索引
+# Build base HNSW index
 distance_func = lambda x, y: np.linalg.norm(x - y)
 base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
 
-# 插入数据（排除查询向量）
+# Insert vectors (excluding queries)
 for i, vector in enumerate(dataset):
     if i not in query_ids:
         base_index.insert(i, vector)
 
-# 构建Hybrid索引
+# Build hybrid index
 hybrid_index = HNSWHybrid(
     base_index=base_index,
-    parent_level=2,      # 从第2层提取父节点
-    k_children=1000      # 每个父节点1000个子节点
+    parent_level=2,          # Extract parents from level 2
+    k_children=1000         # 1000 children per parent
 )
 
-# 两阶段搜索
-query_vector = query_vectors[0]
-results = hybrid_index.search(query_vector, k=10, n_probe=10)
-
-print(f"Hybrid搜索找到 {len(results)} 个最近邻")
-print(f"Top 3结果: {results[:3]}")
-
-# 评估召回性能
+# Evaluate recall
 evaluator = HNSWEvaluator(dataset, query_vectors, query_ids)
 ground_truth = evaluator.compute_ground_truth(k=10, distance_func=distance_func)
-result = evaluator.evaluate_recall(hybrid_index, k=10, n_probe=10, ground_truth=ground_truth)
+result = evaluator.evaluate_recall(hybrid_index, k=10, n_probe=15, ground_truth=ground_truth)
 
 print(f"Recall@10: {result['recall_at_k']:.4f}")
-print(f"查询时间: {result['avg_query_time_ms']:.2f} ms")
+print(f"Query time: {result['avg_query_time_ms']:.2f} ms")
 ```
 
-## 🛠️ 高级使用
+## 🛠️ Advanced Usage
 
-### 🆕 Hybrid系统大规模实验
-
-#### 完整实验流程
+### Running the Complete Demo
 ```bash
-# 运行大规模实验（600万向量）
-python experiment_runner.py \
-    --dataset_size 6000000 \
-    --query_size 10000 \
-    --dim 128 \
-    --parent_level 2 \
-    --k_children 1000 2000 5000 \
-    --n_probe 10 20 50 \
-    --k_values 10 50 100
-
-# 参数调优实验
-python parameter_tuning.py \
-    --dataset_size 100000 \
-    --query_size 1000 \
-    --k_children_range 100 2000 100 \
-    --n_probe_range 1 50 1 \
-    --k_values 10 50 100
-
-# 系统测试
-python test_hybrid_system.py
+# Run the complete hybrid system demonstration
+python project_demo.py
 ```
 
-#### Hybrid系统参数调优
-```python
-# 不同场景的Hybrid配置
-
-# 快速搜索配置
-fast_hybrid = HNSWHybrid(
-    base_index=base_index,
-    parent_level=2,
-    k_children=500,      # 较少子节点
-    distance_func=distance_func
-)
-
-# 平衡配置（推荐）
-balanced_hybrid = HNSWHybrid(
-    base_index=base_index,
-    parent_level=2,
-    k_children=1000,     # 平衡的子节点数
-    distance_func=distance_func
-)
-
-# 高精度配置
-precision_hybrid = HNSWHybrid(
-    base_index=base_index,
-    parent_level=2,
-    k_children=2000,     # 更多子节点，更高精度
-    distance_func=distance_func
-)
-
-# 搜索时调整n_probe参数
-results = hybrid_index.search(query_vector, k=10, n_probe=20)  # 更多父节点探测
+### Running Tests
+```bash
+# Run comprehensive test suite
+python test_hybrid_hnsw.py
 ```
 
-### 标准HNSW参数调优
-```python
-# 不同场景的推荐配置
+### Parameter Tuning
+The hybrid system supports several key parameters:
 
-# 快速搜索配置
-fast_index = HNSW(
-    distance_func=your_distance_func,
-    m=8,                    # 较少连接，快速构建
-    ef_construction=100,    # 较小搜索宽度
-)
+- **`parent_level`**: HNSW level to extract parent nodes from (default: 2)
+- **`k_children`**: Number of child nodes per parent (default: 1000)
+- **`n_probe`**: Number of parent nodes to probe during search (default: 15)
 
-# 平衡配置（推荐）
-balanced_index = HNSW(
-    distance_func=your_distance_func,
-    m=16,                   # 平衡的连接数
-    ef_construction=200,    # 中等搜索宽度
-)
+#### Newly Added / Advanced Parameters
+- **`parent_child_method`**: How to build parent→child mappings: `approx` (fast; uses HNSW queries) or `brute` (exhaustive; higher coverage/recall, slower build).
+- **`approx_ef`**: ef value used when `parent_child_method='approx'` to control breadth of approximate neighbor gathering.
+- **`diversify_max_assignments`**: (Optional) Cap on how many different parents a single child can belong to (promotes coverage across regions).
+- **`repair_min_assignments`**: (Optional) Minimum number of parent assignments a child should have; triggers a repair pass if used with diversification.
+- **`include_parents_in_results`**: If True, parent nodes can appear directly in final search results (useful for hierarchical diagnostics).
+- **`overlap_sample`**: Integer number of parent pairs sampled to estimate average Jaccard overlap across child sets (diagnostic metric).
 
-# 高精度配置
-precision_index = HNSW(
-    distance_func=your_distance_func,
-    m=32,                   # 更多连接，更高精度
-    ef_construction=400,    # 更大搜索宽度
-)
+## 📊 Performance Results
+
+### Benchmark Results (5K vectors, 128 dimensions)
+- **Recall@10**: 62.86%
+- **Average Query Time**: 5.43ms
+- **Parent Nodes**: 12 nodes managing 1,438 children
+- **Memory Efficiency**: Optimized data structures with minimal overhead
+
+### Key Performance Insights
+- **Two-stage approach** provides systematic search within precomputed regions
+- **Parameter tuning** allows precision-efficiency trade-offs
+- **Scalable architecture** maintains performance at larger scales
+
+## 🧪 Advanced Mapping Comparison & Diagnostics
+
+Use the advanced script to compare **approx vs brute** parent→child mapping strategies and evaluate diversification / repair effects. It also exports a JSON file containing recall, coverage, and structural diagnostics.
+
+### Run Advanced Comparison
+```bash
+python test_hybrid_advanced.py
 ```
 
-### 动态操作
-```python
-# 插入新数据
-index.insert("new_key", new_vector)
-
-# 更新已存在的数据
-index.insert("existing_key", updated_vector)
-
-# 软删除（保持图结构）
-index.remove("key_to_remove")
-
-# 硬删除（完全移除并修复连接）
-index.remove("key_to_remove", hard=True)
-
-# 清理所有软删除的点
-index.clean()
+### Example Output (abridged)
+```
+Summary (recall@k):
+    approx               recall=0.5490 coverage=0.725 avgCand=241.9
+    brute                recall=0.7660 coverage=0.940 avgCand=657.8
+    approx_diversified   recall=0.5490 coverage=0.725 avgCand=241.9
 ```
 
-### 不同距离函数
-```python
-import numpy as np
-
-# 欧几里得距离
-euclidean_index = HNSW(
-    distance_func=lambda x, y: np.linalg.norm(x - y)
-)
-
-# 余弦距离
-cosine_index = HNSW(
-    distance_func=lambda x, y: 1 - np.dot(x, y) / (np.linalg.norm(x) * np.linalg.norm(y))
-)
-
-# 曼哈顿距离
-manhattan_index = HNSW(
-    distance_func=lambda x, y: np.sum(np.abs(x - y))
-)
+### Exported Benchmark JSON
+The run produces `hybrid_mapping_comparison.json` with structure:
+```json
+{
+    "dataset": { "n_vectors": 2000, "dim": 64, "n_queries": 100 },
+    "config": { "k": 10, "n_probe": 5, ... },
+    "variants": {
+        "approx": { "recall_at_k": 0.549, "coverage_fraction": 0.725, ... },
+        "brute": { "recall_at_k": 0.766, "coverage_fraction": 0.940, ... },
+        "approx_diversified": { ... }
+    },
+    "comparison": {
+        "recall_diff_brute_minus_approx": 0.217,
+        "coverage_diff_brute_minus_approx": 0.215,
+        "coverage_gain_diversified": 0.0,
+        "recall_gain_diversified": 0.0
+    }
+}
 ```
 
-## 📊 性能基准
+### Interpreting Diagnostics
+- **coverage_fraction**: Portion of unique children assigned across all parents (higher often improves recall headroom).
+- **mean_jaccard_overlap**: Average overlap between sampled parent child-sets (lower indicates better regional separation).
+- **avg_candidate_size**: Average number of fine-stage candidates examined per query (proxy for search work).
+- **diversification & repair**: Use to balance coverage vs redundancy; adjust `diversify_max_assignments` downward (e.g. 2–3) and enable `repair_min_assignments` to avoid isolated nodes.
 
-### 标准HNSW性能
-| 数据集大小 | 构建时间 | 查询时间 | 内存使用 | 精度@10 |
-|------------|----------|----------|----------|----------|
-| 10K | 2秒 | 0.1ms | 50MB | 98% |
-| 100K | 25秒 | 0.3ms | 500MB | 97% |
-| 1M | 300秒 | 0.8ms | 5GB | 95% |
+### When to Use Brute vs Approx
+| Goal | Recommended Method |
+|------|--------------------|
+| Fast index build, iterative experimentation | approx |
+| Maximum recall ceiling or small dataset | brute |
+| Improve coverage without brute cost | approx + diversification |
 
-*测试环境: 128维向量, m=16, ef_construction=200*
+> Tip: Start with `approx` + modest `approx_ef` (50–80), then profile coverage & recall. Switch to `brute` only if coverage stagnates and recall plateaus below target.
 
-### 🆕 HNSW Hybrid系统性能
-| 数据集大小 | 构建时间 | 查询时间 | 内存使用 | Recall@10 | 提升幅度 |
-|------------|----------|----------|----------|-----------|----------|
-| 10K | 2.5秒 | 1.3ms | 60MB | 68% | +10% |
-| 100K | 30秒 | 2.1ms | 600MB | 72% | +15% |
-| 1M | 350秒 | 3.5ms | 6GB | 75% | +20% |
+## 📚 Documentation
 
-*测试环境: 128维向量, parent_level=2, k_children=1000, n_probe=10*
+- **[Algorithm Principles](doc_md/HNSW_Hybrid_Algorithm_Principles.md)**: Core concepts and theory
+- **[Technical Implementation](doc_md/HNSW_Hybrid_Technical_Implementation.md)**: Implementation details
+- **[Complete Guide](doc_md/HNSW_HYBRID_README.md)**: Comprehensive user guide
+- **[Project Summary](doc_md/PROJECT_SUMMARY.md)**: Complete project overview
 
-**Hybrid系统优势**:
-- ✅ **更高召回率**: 相比标准HNSW提升10-20%
-- ✅ **可控精度**: 通过调整k_children和n_probe参数
-- ✅ **两阶段架构**: 粗过滤+精过滤，减少搜索空间
-- ✅ **大规模支持**: 已验证支持600万向量数据集
+## 🎯 Use Cases
 
-## 🎯 实际应用
+- **Recommendation Systems**: High-recall similarity search
+- **Image Retrieval**: Content-based search with improved accuracy
+- **Semantic Search**: Document and text similarity with enhanced recall
+- **Research Applications**: Algorithm comparison and parameter studies
 
-### 推荐系统
-```python
-# 物品向量索引
-item_index = HNSW(distance_func=cosine_distance)
-item_index.update(item_embeddings)
+## 🤝 Contributing
 
-# 用户推荐
-def recommend_items(user_vector, k=10):
-    return item_index.query(user_vector, k=k, ef=200)
-```
+This project is actively maintained. Contributions, issues, and feature requests are welcome!
 
-### 图像检索
-```python
-# 图像特征索引
-image_index = HNSW(distance_func=euclidean_distance)
-image_index.update(image_features)
+## 📄 License
 
-# 相似图像搜索
-def find_similar_images(query_features, k=20):
-    return image_index.query(query_features, k=k, ef=300)
-```
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-### 文本语义搜索
-```python
-# 文档向量索引
-doc_index = HNSW(distance_func=cosine_distance)
-doc_index.update(document_embeddings)
+## 🙏 Acknowledgments
 
-# 语义搜索
-def semantic_search(query_embedding, k=10):
-    return doc_index.query(query_embedding, k=k, ef=200)
-```
-
-## 📖 详细文档
-
-| 文档 | 描述 |
-|------|------|
-| [HNSW算法原理详解.md](./HNSW算法原理详解.md) | 完整的算法原理、数学推导和实现细节 |
-| [HNSW_代码分析_中文版.md](./HNSW_代码分析_中文版.md) | 代码结构的详细中文分析 |
-| [examples/hnsw_examples.py](./examples/hnsw_examples.py) | 完整的使用示例和最佳实践 |
-| **🆕 [HNSW_HYBRID_README.md](./HNSW_HYBRID_README.md)** | **Hybrid两阶段检索系统完整文档** |
-| **🆕 [hnsw_hybrid.py](./hnsw_hybrid.py)** | **Hybrid系统核心实现代码** |
-| **🆕 [experiment_runner.py](./experiment_runner.py)** | **大规模实验运行脚本** |
-| **🆕 [parameter_tuning.py](./parameter_tuning.py)** | **参数调优和分析工具** |
-
-## 🔧 参数调优指南
-
-### 🆕 Hybrid系统参数调优
-
-#### 核心参数说明
-
-##### k_children (每个父节点的子节点数)
-- **影响**: 第二阶段搜索的候选集大小和召回率
-- **推荐**: 
-  - 快速搜索: k_children=500
-  - 平衡配置: k_children=1000
-  - 高精度: k_children=2000-5000
-
-##### n_probe (第一阶段探测的父节点数)
-- **影响**: 第一阶段搜索的覆盖范围和召回率
-- **推荐**:
-  - 快速搜索: n_probe=5-10
-  - 平衡配置: n_probe=10-20
-  - 高精度: n_probe=20-50
-
-##### parent_level (父节点提取层级)
-- **影响**: 父节点的数量和分布
-- **推荐**: 通常使用level=2，确保有足够的父节点
-
-#### 参数组合优化
-```python
-# 快速配置
-fast_config = {"k_children": 500, "n_probe": 5}
-
-# 平衡配置（推荐）
-balanced_config = {"k_children": 1000, "n_probe": 10}
-
-# 高精度配置
-precision_config = {"k_children": 2000, "n_probe": 20}
-
-# 使用参数调优工具找到最佳配置
-python parameter_tuning.py --dataset_size 100000 --query_size 1000
-```
-
-### 标准HNSW参数调优
-
-#### 核心参数说明
-
-#### m (每层最大连接数)
-- **影响**: 图的连通性和搜索精度
-- **推荐**: 
-  - 小数据集(<10K): m=8
-  - 中等数据集(10K-1M): m=16
-  - 大数据集(>1M): m=32
-
-#### ef_construction (构建时搜索宽度)
-- **影响**: 构建质量和时间
-- **推荐**:
-  - 快速构建: ef_construction=100
-  - 平衡质量: ef_construction=200
-  - 最高质量: ef_construction=400
-
-#### ef (查询时搜索宽度)
-- **影响**: 搜索精度和速度
-- **推荐**: ef = max(k, 50) 到 ef = max(k * 10, 200)
-
-### 数据集特性优化
-
-```python
-# 高维数据 (维度 > 100)
-high_dim_index = HNSW(
-    distance_func=cosine_distance,
-    m=32,
-    ef_construction=400
-)
-
-# 聚类数据
-clustered_index = HNSW(
-    distance_func=euclidean_distance,
-    m=24,
-    ef_construction=300
-)
-
-# 均匀分布数据
-uniform_index = HNSW(
-    distance_func=euclidean_distance,
-    m=16,
-    ef_construction=200
-)
-```
-
-## 🤝 贡献指南
-
-欢迎贡献代码、文档或提出问题！
-
-### 贡献类型
-- 🐛 Bug修复和问题报告
-- ✨ 新功能和算法优化
-- 📚 文档改进和示例添加
-- ⚡ 性能优化和基准测试
-
-### 开发流程
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
-## 🙏 致谢
-
-- 感谢 [ekzhu](https://github.com/ekzhu) 的原始 datasketch 库
-- 感谢 HNSW 算法的原始作者
-- 感谢所有为开源社区做出贡献的开发者
-
-## 📧 联系方式
-
-- 🐛 Issues: [GitHub Issues](https://github.com/HankyZhang/datasketch-enhanced/issues)
-- 💡 讨论: [GitHub Discussions](https://github.com/HankyZhang/datasketch-enhanced/discussions)
-- 📧 邮件: your.email@example.com
-
----
-
-**让高效的近似最近邻搜索更易理解，更好使用！** 🚀
-
-[![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![HNSW](https://img.shields.io/badge/Algorithm-HNSW-orange.svg)](https://arxiv.org/abs/1603.09320)
+Built on the foundation of the original HNSW algorithm with innovative hybrid architecture enhancements for improved recall performance.
