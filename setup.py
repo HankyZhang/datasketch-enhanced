@@ -22,7 +22,7 @@ except FileNotFoundError:
 
 # Get the code version
 version = {}
-with open(path.join(here, "datasketch/version.py")) as fp:
+with open(path.join(here, "hnsw/version.py")) as fp:
     exec(fp.read(), version)
 __version__ = version['__version__']
 # now we have a `__version__` variable

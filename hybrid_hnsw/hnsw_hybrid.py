@@ -16,7 +16,12 @@ from typing import Dict, List, Tuple, Set, Optional, Hashable
 from collections import defaultdict
 import heapq
 from math import ceil
-from hnsw import HNSW
+import sys
+import os
+
+# Add parent directory to path to import hnsw module
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from hnsw.hnsw import HNSW
 
 
 class HNSWHybrid:
