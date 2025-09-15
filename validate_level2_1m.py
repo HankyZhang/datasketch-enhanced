@@ -160,24 +160,37 @@ def load_ground_truth(query_count: int, base_count: int) -> np.ndarray:
         
         # Filter to only include indices that exist in our base subset
         filtered_gt = []
+        valid_queries = []
+        
         for i in range(len(real_gt)):
             valid_indices = [idx for idx in real_gt[i] if idx < base_count]
             if len(valid_indices) >= 10:  # Ensure we have enough valid ground truth
-                filtered_gt.append(valid_indices[:100])  # Take top 100
+                # Pad or truncate to exactly 100 elements
+                if len(valid_indices) >= 100:
+                    filtered_gt.append(valid_indices[:100])
+                else:
+                    # Pad with -1 (invalid) if not enough valid indices
+                    padded = valid_indices + [-1] * (100 - len(valid_indices))
+                    filtered_gt.append(padded)
+                valid_queries.append(i)
             else:
                 print(f"  Warning: Query {i} has only {len(valid_indices)} valid GT indices")
                 
         if len(filtered_gt) >= query_count // 2:  # If we have valid GT for at least half queries
             print(f"  Using real SIFT ground truth for {len(filtered_gt)} queries")
-            return np.array(filtered_gt)
+            print(f"  Falling back to computed GT for queries with insufficient real GT")
+            # Return the filtered ground truth as a proper numpy array
+            return np.array(filtered_gt), valid_queries
         else:
             print("  Insufficient valid real ground truth, computing subset GT...")
             
     except FileNotFoundError:
         print("  Real SIFT ground truth not found, computing subset GT...")
+    except Exception as e:
+        print(f"  Error loading real ground truth: {e}")
     
     # Fallback to computed ground truth
-    return None
+    return None, None
 
 def comprehensive_recall_validation():
     """Comprehensive recall validation across algorithm variants."""
@@ -196,11 +209,9 @@ def comprehensive_recall_validation():
     
     print(f"Dataset: {len(base_vectors)} base vectors, {len(query_vectors)} queries")
     
-    # Load ground truth - prefer real SIFT GT
-    ground_truth = load_ground_truth(len(query_vectors), len(base_vectors))
-    if ground_truth is None:
-        print("🎯 Computing ground truth...")
-        ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
+    # Compute ground truth for reliable testing
+    print("🎯 Computing ground truth...")
+    ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
     
     distance_func = lambda x, y: np.linalg.norm(x - y)
     dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
