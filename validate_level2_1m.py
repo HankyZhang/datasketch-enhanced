@@ -4,8 +4,12 @@ Enhanced Level 2 Validation with Recall Rate Analysis
 Tests recall performance across different algorithms and methods before full 1M run
 
 Algorithms tested:
-1. Standard HNSW (approximate hierarchical search)
-2. Hybrid HNSW with method variants:
+1. Standard HNSW (approximate hierarchical search            print(f"    ef={ef}: R@1={result['recall_at_1']:.3f}, R@10={result['recall_at_10']:.3f}, "
+                  f"R@100={result['recall_at_100']:.3f}, Time={result['avg_query_time_ms']:.2f}ms")
+            
+            # Warning for suspiciously high recall
+            if result['recall_at_10'] > 0.95 and ef < 50:
+                print(f"    ⚠️  Suspiciously high recall with low ef={ef}!")Hybrid HNSW with method variants:
    - approx: Fast approximate parent-child mapping
    - brute: Exact brute force parent-child mapping
    - diversify: Assignment limiting for balanced coverage
@@ -147,6 +151,34 @@ def evaluate_recall_performance(
         'std_recall_at_10': np.std(recalls_10)
     }
 
+def load_ground_truth(query_count: int, base_count: int) -> np.ndarray:
+    """Load ground truth - prefer real SIFT GT when available, fallback to computed."""
+    try:
+        # Try to load real SIFT ground truth
+        print("🎯 Loading real SIFT ground truth...")
+        real_gt = read_ivecs("sift/sift_groundtruth.ivecs", query_count)
+        
+        # Filter to only include indices that exist in our base subset
+        filtered_gt = []
+        for i in range(len(real_gt)):
+            valid_indices = [idx for idx in real_gt[i] if idx < base_count]
+            if len(valid_indices) >= 10:  # Ensure we have enough valid ground truth
+                filtered_gt.append(valid_indices[:100])  # Take top 100
+            else:
+                print(f"  Warning: Query {i} has only {len(valid_indices)} valid GT indices")
+                
+        if len(filtered_gt) >= query_count // 2:  # If we have valid GT for at least half queries
+            print(f"  Using real SIFT ground truth for {len(filtered_gt)} queries")
+            return np.array(filtered_gt)
+        else:
+            print("  Insufficient valid real ground truth, computing subset GT...")
+            
+    except FileNotFoundError:
+        print("  Real SIFT ground truth not found, computing subset GT...")
+    
+    # Fallback to computed ground truth
+    return None
+
 def comprehensive_recall_validation():
     """Comprehensive recall validation across algorithm variants."""
     print("🎯 COMPREHENSIVE RECALL VALIDATION")
@@ -157,16 +189,18 @@ def comprehensive_recall_validation():
     from hnsw import HNSW
     from hybrid_hnsw import HNSWHybrid
     
-    # Load test dataset
+    # Load test dataset - Use larger dataset and more challenging parameters
     print("📚 Loading test dataset...")
-    base_vectors = read_fvecs("sift/sift_base.fvecs", 25000)  # 25K for faster testing
-    query_vectors = read_fvecs("sift/sift_query.fvecs", 50)   # 50 queries
+    base_vectors = read_fvecs("sift/sift_base.fvecs", 100000)  # 100K for realistic testing
+    query_vectors = read_fvecs("sift/sift_query.fvecs", 100)   # 100 queries
     
     print(f"Dataset: {len(base_vectors)} base vectors, {len(query_vectors)} queries")
     
-    # Compute ground truth
-    print("🎯 Computing ground truth...")
-    ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
+    # Load ground truth - prefer real SIFT GT
+    ground_truth = load_ground_truth(len(query_vectors), len(base_vectors))
+    if ground_truth is None:
+        print("🎯 Computing ground truth...")
+        ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
     
     distance_func = lambda x, y: np.linalg.norm(x - y)
     dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
@@ -178,6 +212,7 @@ def comprehensive_recall_validation():
     print("-" * 40)
     
     hnsw_configs = [
+        {"m": 8, "ef_construction": 100, "name": "Low Quality"},      # Reduced quality
         {"m": 16, "ef_construction": 200, "name": "Standard"},
         {"m": 16, "ef_construction": 400, "name": "High Quality"},
         {"m": 24, "ef_construction": 400, "name": "High Connectivity"},
@@ -194,8 +229,8 @@ def comprehensive_recall_validation():
         
         print(f"  Built in {build_time:.2f}s")
         
-        # Test different ef values
-        for ef in [50, 100, 200, 400]:
+        # Test different ef values - Include lower ef values to stress-test recall
+        for ef in [10, 20, 50, 100, 200, 400]:  # Added lower ef values
             result = evaluate_recall_performance(
                 hnsw_index, 
                 query_vectors, 
@@ -209,6 +244,10 @@ def comprehensive_recall_validation():
             
             print(f"    ef={ef}: R@1={result['recall_at_1']:.3f}, R@10={result['recall_at_10']:.3f}, "
                   f"R@100={result['recall_at_100']:.3f}, Time={result['avg_query_time_ms']:.2f}ms")
+            
+            # Warning for suspiciously high recall
+            if result['recall_at_10'] > 0.95 and ef < 50:
+                print(f"    ⚠️  Suspiciously high recall with low ef={ef}!")
     
     # 2. Hybrid HNSW Testing with Method Variants
     print(f"\n🚀 HYBRID HNSW TESTING - METHOD VARIANTS")
@@ -418,9 +457,9 @@ def test_parameter_sensitivity():
     from hnsw import HNSW
     from hybrid_hnsw import HNSWHybrid
     
-    # Load test dataset
-    base_vectors = read_fvecs("sift/sift_base.fvecs", 20000)  # 20K for sensitivity testing
-    query_vectors = read_fvecs("sift/sift_query.fvecs", 25)   # 25 queries
+    # Load test dataset - Use larger dataset to avoid perfect recall
+    base_vectors = read_fvecs("sift/sift_base.fvecs", 50000)  # 50K for sensitivity testing
+    query_vectors = read_fvecs("sift/sift_query.fvecs", 50)   # 50 queries
     ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
     
     distance_func = lambda x, y: np.linalg.norm(x - y)
@@ -638,6 +677,18 @@ def main():
             print(f"🏆 Best Overall Recall@10: {best_overall['recall_at_10']:.3f}")
             print(f"   Algorithm: {best_overall['algorithm']}")
             
+            # Recall distribution analysis
+            all_recalls = [r['recall_at_10'] for r in results]
+            perfect_recall_count = sum(1 for r in all_recalls if r >= 0.99)
+            print(f"\n📈 Recall Distribution:")
+            print(f"   Perfect recall (≥0.99): {perfect_recall_count}/{len(all_recalls)} configs")
+            print(f"   Average recall@10: {np.mean(all_recalls):.3f}")
+            print(f"   Recall range: {min(all_recalls):.3f} - {max(all_recalls):.3f}")
+            
+            if perfect_recall_count > len(all_recalls) * 0.8:
+                print(f"   ⚠️  {perfect_recall_count/len(all_recalls)*100:.0f}% configs show near-perfect recall!")
+                print(f"   This suggests dataset may be too small or parameters too high-quality.")
+            
             # Method effectiveness
             hybrid_results = [r for r in results if 'Hybrid' in r['algorithm']]
             if hybrid_results:
@@ -651,7 +702,8 @@ def main():
                 print(f"\n📈 Method Performance Summary:")
                 for method, recalls in method_performance.items():
                     avg_recall = np.mean(recalls)
-                    print(f"   {method.capitalize()}: {avg_recall:.3f} avg recall@10")
+                    std_recall = np.std(recalls)
+                    print(f"   {method.capitalize()}: {avg_recall:.3f} ± {std_recall:.3f} avg recall@10")
         
         if ready:
             print(f"\n🚀 System ready for 1M dataset testing!")
