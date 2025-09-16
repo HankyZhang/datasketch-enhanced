@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hybrid HNSW Benchmark (1K & 1M Scales)
+Hybrid HNSW Benchmark (1K & 100K Scales)
 
 Goal:
   Measure hybrid HNSW recall & latency under different parameter settings at:
     - Small scale (1K base vectors) for rapid iteration (brute-force GT)
-    - Full scale (1M base vectors) using provided SIFT ground truth (no brute-force)
+    - Large scale (100K base vectors) using provided SIFT ground truth (no brute-force)
 
 Parameters (env overrides):
   SMALL_BASE=1000          # base vectors for small test
   SMALL_QUERIES=100        # queries for small test (subset of sift_query)
-  LARGE_BASE=1000000       # should remain 1_000_000 for full SIFT
-  LARGE_QUERIES=500        # number of queries sampled for 1M test (<=10000)
+  LARGE_BASE=100000        # base vectors for large test (default 100K for faster testing)
+  LARGE_QUERIES=50         # number of queries sampled for large test (<=10000)
     K_CHILDREN=500,1000      # comma list. If omitted AND AUTO_K_CHILDREN=1 -> auto scale.
     AUTO_K_CHILDREN=1        # when set (and no explicit K_CHILDREN list) derive per-scale list
         DIV_MAX_ASSIGNMENTS=0,3  # comma list; 0 disables diversification; produces variants
@@ -306,7 +306,7 @@ def run_scale(
                             for t in frac_targets:
                                 if t not in adjusted_n_probe:
                                     adjusted_n_probe.append(t)
-                        # Add higher coverage fractions (e.g., 60%, 75%, 90%) if configured
+                        # Add higher coverage fractions if configured
                         if num_parents > 1 and extra_probe_fracs:
                             for f in extra_probe_fracs:
                                 if f <= 0:
@@ -360,9 +360,9 @@ def main():  # pragma: no cover
     # Environment config
     small_base = int(os.getenv('SMALL_BASE', '1000'))
     small_queries = int(os.getenv('SMALL_QUERIES', '100'))
-    large_base = int(os.getenv('LARGE_BASE', '1000000'))
-    large_queries = int(os.getenv('LARGE_QUERIES', '500'))
-    k_children_list = parse_list('K_CHILDREN', '500,1000')
+    large_base = int(os.getenv('LARGE_BASE', '100000'))
+    large_queries = int(os.getenv('LARGE_QUERIES', '50'))
+    k_children_list = parse_list('K_CHILDREN', '5000,10000')
     auto_k_children = os.getenv('AUTO_K_CHILDREN', '0') in ('1','true','True')
     diversify_values = parse_list('DIV_MAX_ASSIGNMENTS', '0,3')
     repair_values = parse_list('REPAIR_MIN_ASSIGNMENTS', '0')
@@ -377,7 +377,7 @@ def main():  # pragma: no cover
     random.seed(42)
     np.random.seed(42)
 
-    print("=== Hybrid HNSW Benchmark (1K & 1M) ===")
+    print("=== Hybrid HNSW Benchmark (1K & 100K) ===")
     print(f"Small scale: base={small_base} queries={small_queries}")
     print(f"Large scale: base={large_base} queries={large_queries}")
     if auto_k_children and not k_children_list:
@@ -410,7 +410,7 @@ def main():  # pragma: no cover
 
     # For large scale, discourage brute to save time
     large_methods = [m for m in methods if m == 'approx'] or ['approx']
-    all_results += run_scale('1M', large_base_vecs, large_query_vecs, large_gt, k_children_list, parent_levels, large_methods, n_probe_list, k_eval, k_gt, limit_queries=large_queries, auto_k=auto_k_children, diversify_values=diversify_values, repair_values=repair_values, extra_probe_fracs=extra_probe_fracs, include_full_probe=include_full_probe)
+    all_results += run_scale('100K', large_base_vecs, large_query_vecs, large_gt, k_children_list, parent_levels, large_methods, n_probe_list, k_eval, k_gt, limit_queries=large_queries, auto_k=auto_k_children, diversify_values=diversify_values, repair_values=repair_values, extra_probe_fracs=extra_probe_fracs, include_full_probe=include_full_probe)
 
     # Aggregate best configs
     def best_by(metric: str, scale: str):
@@ -419,9 +419,9 @@ def main():  # pragma: no cover
 
     summary = {
         'best_1K_recall10': best_by('recall_at_10', '1K'),
-        'best_1M_recall10': best_by('recall_at_10', '1M'),
+        'best_100K_recall10': best_by('recall_at_10', '100K'),
         'best_1K_speed': min([r for r in all_results if r['scale']=='1K'], key=lambda x: x['avg_query_ms']) if any(r['scale']=='1K' for r in all_results) else None,
-        'best_1M_speed': min([r for r in all_results if r['scale']=='1M'], key=lambda x: x['avg_query_ms']) if any(r['scale']=='1M' for r in all_results) else None,
+        'best_100K_speed': min([r for r in all_results if r['scale']=='100K'], key=lambda x: x['avg_query_ms']) if any(r['scale']=='100K' for r in all_results) else None,
     }
 
     out = {
@@ -458,9 +458,9 @@ def main():  # pragma: no cover
         print(f"{label}: method={row['method']} level={row['parent_level']} k_children={row['k_children']} n_probe={row['n_probe']} R@10={row['recall_at_10']:.4f} time={row['avg_query_ms']:.2f}ms")
     print("\n=== SUMMARY ===")
     pr('Best 1K Recall', summary['best_1K_recall10'])
-    pr('Best 1M Recall', summary['best_1M_recall10'])
+    pr('Best 100K Recall', summary['best_100K_recall10'])
     pr('Fastest 1K', summary['best_1K_speed'])
-    pr('Fastest 1M', summary['best_1M_speed'])
+    pr('Fastest 100K', summary['best_100K_speed'])
     return 0
 
 
