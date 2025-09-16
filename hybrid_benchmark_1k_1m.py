@@ -178,29 +178,51 @@ def parse_float_list(env_name: str, default: str) -> List[float]:
     return vals
 
 
-def derive_k_children_list(dataset_size: int) -> List[int]:
-    """Adaptive k_children selection.
+def derive_k_children_list(dataset_size: int, num_parents: int = None) -> List[int]:
+    """Adaptive k_children selection based on dataset size and number of parents.
 
-    Small (<=5K): richer fractions 5%-12% (capped) for near-full coverage.
-    Large (>5K): target 0.5%, 1.0%, 1.5% → yields ~5K / 10K / 15K for 1M (user requested),
-                 plus sqrt(N) if it provides a distinct low anchor.
+    The key insight: k_children should ensure good coverage without excessive overlap.
+    Coverage_ratio = (num_parents * k_children) / dataset_size should be 1.2-2.0 for good recall.
     """
     if dataset_size <= 5000:
+        # Small datasets: use percentage-based approach
         frac_candidates = [0.05, 0.09, 0.12]
-    else:
-        # 0.5%, 1%, 1.5% as requested (avoid 2% 20K upper heavy build)
-        frac_candidates = [0.005, 0.01, 0.015]
-    values: List[int] = []
-    for f in frac_candidates:
-        k = int(dataset_size * f)
-        if dataset_size <= 5000:
+        values = []
+        for f in frac_candidates:
+            k = int(dataset_size * f)
             k = max(25, min(k, dataset_size - 10))
+            values.append(k)
+    else:
+        # Large datasets: use coverage-based approach
+        if num_parents:
+            # Calculate k_children for different coverage ratios
+            ideal_coverage_per_parent = dataset_size / num_parents
+            values = []
+            
+            # Conservative: ~80% coverage per parent
+            k1 = max(200, int(ideal_coverage_per_parent * 0.8))
+            values.append(min(k1, 5000))
+            
+            # Balanced: ~120% coverage per parent (some overlap)
+            k2 = max(300, int(ideal_coverage_per_parent * 1.2))
+            values.append(min(k2, 8000))
+            
+            # Aggressive: ~200% coverage per parent (more overlap, better recall)
+            k3 = max(500, int(ideal_coverage_per_parent * 2.0))
+            values.append(min(k3, 15000))
         else:
-            k = max(200, min(k, 15000))  # cap 15K per request
-        values.append(k)
+            # Fallback to percentage if num_parents unknown
+            frac_candidates = [0.005, 0.01, 0.015]
+            values = []
+            for f in frac_candidates:
+                k = int(dataset_size * f)
+                k = max(200, min(k, 15000))
+                values.append(k)
+    
     sqrt_k = int(math.sqrt(dataset_size))
     if dataset_size > 5000 and 200 <= sqrt_k <= 15000:
         values.append(sqrt_k)
+    
     return sorted(set(values))
 
 
@@ -250,7 +272,22 @@ def run_scale(
     for method in methods:
         for parent_level in parent_levels:
             # Derive per-scale k_children dynamically if auto enabled
-            current_k_children_list = derive_k_children_list(len(base_vecs)) if auto_k and not k_children_list else k_children_list
+            # First, get number of parents at this level to calculate appropriate k_children
+            if auto_k and not k_children_list:
+                # Build a temporary count to determine parents at this level
+                if parent_level >= len(base_index._graphs):
+                    adjusted_level = len(base_index._graphs) - 1
+                else:
+                    adjusted_level = parent_level
+                
+                target_layer = base_index._graphs[adjusted_level]
+                num_parents_at_level = len([nid for nid in target_layer 
+                                          if nid in base_index and not base_index._nodes[nid].is_deleted])
+                
+                current_k_children_list = derive_k_children_list(len(base_vecs), num_parents_at_level)
+                print(f"  Auto k_children for level {parent_level} ({num_parents_at_level} parents): {current_k_children_list}")
+            else:
+                current_k_children_list = k_children_list
             for k_children in current_k_children_list:
                 # Variant matrix for diversify/repair
                 div_list = diversify_values or [0]
@@ -366,7 +403,7 @@ def main():  # pragma: no cover
     auto_k_children = os.getenv('AUTO_K_CHILDREN', '0') in ('1','true','True')
     diversify_values = parse_list('DIV_MAX_ASSIGNMENTS', '0,3')
     repair_values = parse_list('REPAIR_MIN_ASSIGNMENTS', '0')
-    parent_levels = parse_list('PARENT_LEVELS', '2')
+    parent_levels = parse_list('PARENT_LEVELS', '1,2')
     n_probe_list = parse_list('N_PROBE', '1,2,3,5,10,20')
     extra_probe_fracs = parse_float_list('N_PROBE_EXTRA_FRACTIONS', '0.6,0.75,0.9')
     include_full_probe = os.getenv('N_PROBE_INCLUDE_FULL', '0') in ('1','true','True')
@@ -401,8 +438,19 @@ def main():  # pragma: no cover
     # LARGE SCALE DATA (only read needed portion; for 1M we read all)
     large_base_vecs = read_fvecs('sift/sift_base.fvecs', large_base)
     large_query_vecs = full_queries[:large_queries]
-    sift_gt_full = load_sift_gt(k_gt)  # 10K x k_gt
-    large_gt = sift_gt_full[:large_queries]
+    
+    # Important: SIFT ground truth is only valid for the full 1M dataset!
+    # If we're using a subset, we must compute ground truth from our subset
+    if large_base >= 1000000:
+        # Full dataset - use official SIFT ground truth
+        sift_gt_full = load_sift_gt(k_gt)  # 10K x k_gt
+        large_gt = sift_gt_full[:large_queries]
+        print(f"Using official SIFT ground truth for full dataset ({large_base} vectors)")
+    else:
+        # Subset dataset - compute ground truth from our subset
+        print(f"Computing ground truth for subset dataset ({large_base} vectors)")
+        large_gt = compute_bruteforce_gt(large_base_vecs, large_query_vecs, k_gt)
+        print(f"Ground truth computation completed")
 
     all_results: List[Dict[str, Any]] = []
     # Run small scale with full method list (brute allowed)

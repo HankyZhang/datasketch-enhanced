@@ -149,7 +149,7 @@ def evaluate_clustering(kmeans_model, X: np.ndarray, true_labels: Optional[np.nd
     
     # Cluster distribution analysis
     unique_labels, counts = np.unique(predicted_labels, return_counts=True)
-    metrics['cluster_sizes'] = dict(zip(unique_labels.tolist(), counts.tolist()))
+    metrics['cluster_sizes'] = {int(label): int(count) for label, count in zip(unique_labels, counts)}
     metrics['avg_cluster_size'] = float(np.mean(counts))
     metrics['std_cluster_size'] = float(np.std(counts))
     metrics['min_cluster_size'] = int(np.min(counts))

@@ -248,5 +248,7 @@ class KMeans:
             'n_iterations': self.n_iter_,
             'cluster_sizes': dict(zip(unique_labels, cluster_sizes)),
             'avg_cluster_size': np.mean(cluster_sizes),
-            'std_cluster_size': np.std(cluster_sizes)
+            'std_cluster_size': np.std(cluster_sizes),
+            'min_cluster_size': np.min(cluster_sizes),
+            'max_cluster_size': np.max(cluster_sizes)
         }

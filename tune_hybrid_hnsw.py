@@ -152,14 +152,6 @@ class HybridHNSWTuner:
             (16, 400, 2, 500, 5000),     # High quality base, fewer children, large approx_ef
             (16, 400, 2, 1000, 10000),   # High quality base, medium children, large approx_ef
             (16, 400, 2, 2000, 20000),   # High quality base, more children, very large approx_ef
-            (16, 800, 2, 1000, 15000),   # Very high quality base, large approx_ef
-            (16, 800, 2, 2000, 25000),   # Very high quality base, more children, very large approx_ef
-            (32, 400, 2, 1000, 12000),   # Higher connectivity, large approx_ef
-            (32, 400, 2, 2000, 22000),   # Higher connectivity, more children, very large approx_ef
-            (32, 800, 2, 1000, 18000),   # High connectivity + high quality, large approx_ef
-            (32, 800, 2, 2000, 30000),   # High connectivity + high quality, more children, very large approx_ef
-            (64, 400, 2, 1000, 15000),   # Very high connectivity, large approx_ef
-            (64, 800, 2, 2000, 35000),   # Maximum quality configuration, very large approx_ef
         ]
         
         test_probes = [1, 2, 5, 10, 20, 50, 100, 200]  # Extended probe range for high recall
