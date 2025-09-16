@@ -53,7 +53,7 @@ def compute_ground_truth(base_vectors: np.ndarray, query_vectors: np.ndarray, k:
 class HybridHNSWTuner:
     """Parameter tuning for Hybrid HNSW."""
     
-    def __init__(self, base_size: int = 5000, query_size: int = 100):
+    def __init__(self, base_size: int = 100000, query_size: int = 100):
         self.base_size = base_size
         self.query_size = query_size
         self.load_data()
@@ -67,12 +67,12 @@ class HybridHNSWTuner:
         print(f"Loaded {len(self.base_vectors)} base vectors, {len(self.query_vectors)} queries")
         
     def test_configuration(self, m: int, ef_construction: int, parent_level: int, 
-                          k_children: int, test_probes: List[int]) -> Dict:
+                          k_children: int, test_probes: List[int], approx_ef: Optional[int] = None) -> Dict:
         """Test a specific hybrid configuration."""
         from hnsw import HNSW
         from hybrid_hnsw import HNSWHybrid
         
-        print(f"\nTesting: m={m}, ef_c={ef_construction}, level={parent_level}, k_children={k_children}")
+        print(f"\nTesting: m={m}, ef_c={ef_construction}, level={parent_level}, k_children={k_children}, approx_ef={approx_ef}")
         
         # Build base index
         distance_func = lambda x, y: np.linalg.norm(x - y)
@@ -84,18 +84,20 @@ class HybridHNSWTuner:
         base_index.update(dataset)
         base_build_time = time.time() - start_time
         
-        # Build hybrid structure
+        # Build hybrid structure with custom approx_ef
         start_time = time.time()
         hybrid_index = HNSWHybrid(
             base_index=base_index,
             parent_level=parent_level,
             k_children=k_children,
-            parent_child_method='exact'  # Use exact for better recall
+            parent_child_method='exact',  # Use exact for better recall
+            approx_ef=approx_ef  # Set large approx_ef for high recall
         )
         hybrid_build_time = time.time() - start_time
         
         stats = hybrid_index.get_stats()
-        print(f"  Built: {stats.get('num_parents', 0)} parents, {stats.get('num_children', 0)} children")
+        actual_approx_ef = stats.get('approx_ef', hybrid_index.approx_ef)
+        print(f"  Built: {stats.get('num_parents', 0)} parents, {stats.get('num_children', 0)} children, approx_ef={actual_approx_ef}")
         
         # Test different n_probe values
         results = []
@@ -131,7 +133,8 @@ class HybridHNSWTuner:
                 'm': m,
                 'ef_construction': ef_construction,
                 'parent_level': parent_level,
-                'k_children': k_children
+                'k_children': k_children,
+                'approx_ef': actual_approx_ef
             },
             'build_time': base_build_time + hybrid_build_time,
             'stats': stats,
@@ -143,25 +146,30 @@ class HybridHNSWTuner:
         print("🔍 Hybrid HNSW Parameter Grid Search")
         print("=" * 50)
         
-        # Define parameter grid
+        # Define parameter grid - Focus on level 2 with high recall configurations
         configs = [
-            # (m, ef_construction, parent_level, k_children)
-            (16, 200, 1, 500),   # More parents, fewer children
-            (16, 200, 1, 1000),  # More parents, medium children
-            (16, 200, 2, 1000),  # Balanced (original)
-            (16, 200, 2, 2000),  # Balanced, more children
-            (16, 400, 2, 1000),  # Higher quality base index
-            (32, 200, 2, 1000),  # Higher connectivity
+            # (m, ef_construction, parent_level, k_children, approx_ef)
+            (16, 400, 2, 500, 5000),     # High quality base, fewer children, large approx_ef
+            (16, 400, 2, 1000, 10000),   # High quality base, medium children, large approx_ef
+            (16, 400, 2, 2000, 20000),   # High quality base, more children, very large approx_ef
+            (16, 800, 2, 1000, 15000),   # Very high quality base, large approx_ef
+            (16, 800, 2, 2000, 25000),   # Very high quality base, more children, very large approx_ef
+            (32, 400, 2, 1000, 12000),   # Higher connectivity, large approx_ef
+            (32, 400, 2, 2000, 22000),   # Higher connectivity, more children, very large approx_ef
+            (32, 800, 2, 1000, 18000),   # High connectivity + high quality, large approx_ef
+            (32, 800, 2, 2000, 30000),   # High connectivity + high quality, more children, very large approx_ef
+            (64, 400, 2, 1000, 15000),   # Very high connectivity, large approx_ef
+            (64, 800, 2, 2000, 35000),   # Maximum quality configuration, very large approx_ef
         ]
         
-        test_probes = [1, 2, 5, 10, 20, 50]
+        test_probes = [1, 2, 5, 10, 20, 50, 100, 200]  # Extended probe range for high recall
         all_results = []
         
         for config in configs:
-            m, ef_construction, parent_level, k_children = config
+            m, ef_construction, parent_level, k_children, approx_ef = config
             try:
                 result = self.test_configuration(m, ef_construction, parent_level, 
-                                               k_children, test_probes)
+                                               k_children, test_probes, approx_ef)
                 all_results.append(result)
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
@@ -174,8 +182,8 @@ class HybridHNSWTuner:
         
         best_configs = []
         
-        # Find best configurations for different recall targets
-        recall_targets = [0.7, 0.8, 0.9]
+        # Find best configurations for different recall targets - Focus on high recall
+        recall_targets = [0.8, 0.9, 0.95, 0.99]  # Higher recall targets
         
         for target_recall in recall_targets:
             best_config = None
@@ -224,23 +232,49 @@ class HybridHNSWTuner:
         print(f"\n📁 Detailed results saved to hybrid_hnsw_tuning.json")
         
         # Recommendations
-        print("\n🎯 RECOMMENDATIONS")
-        print("=" * 30)
-        print("For high recall (>90%):")
-        if best_configs and best_configs[-1][0] >= 0.9:
-            config = best_configs[-1][1]
+        print("\n🎯 RECOMMENDATIONS FOR HIGHEST RECALL")
+        print("=" * 40)
+        
+        # Find absolute highest recall configuration
+        highest_recall = 0
+        highest_recall_config = None
+        
+        for result in all_results:
+            for probe_result in result['results']:
+                if probe_result['recall_at_10'] > highest_recall:
+                    highest_recall = probe_result['recall_at_10']
+                    highest_recall_config = {
+                        'config': result['config'],
+                        'n_probe': probe_result['n_probe'],
+                        'query_time_ms': probe_result['query_time_ms'],
+                        'recall_at_10': probe_result['recall_at_10'],
+                        'build_time': result['build_time']
+                    }
+        
+        if highest_recall_config:
+            print(f"HIGHEST RECALL ACHIEVED: {highest_recall:.4f}")
+            print(f"  Config: {highest_recall_config['config']}")
+            print(f"  n_probe: {highest_recall_config['n_probe']}")
+            print(f"  Query time: {highest_recall_config['query_time_ms']:.2f}ms")
+            print(f"  Build time: {highest_recall_config['build_time']:.2f}s")
+        
+        print("\nFor very high recall (>95%):")
+        if best_configs and any(target >= 0.95 for target, _ in best_configs):
+            config = next(config for target, config in best_configs if target >= 0.95)
             print(f"  Use: {config['config']} with n_probe={config['n_probe']}")
         else:
-            print("  Consider increasing k_children or using parent_level=1")
+            print("  Consider increasing ef_construction, m, or k_children further")
         
-        print("For balanced performance:")
-        if best_configs and len(best_configs) >= 2:
-            config = best_configs[1][1]  # 0.8 recall target
+        print("For high recall (>90%):")
+        if best_configs and any(target >= 0.9 for target, _ in best_configs):
+            config = next(config for target, config in best_configs if target >= 0.9)
             print(f"  Use: {config['config']} with n_probe={config['n_probe']}")
+        else:
+            print("  Consider increasing k_children or ef_construction")
         
-        print("For maximum speed:")
+        print("For good recall (>80%):")
         if best_configs:
-            config = best_configs[0][1]  # 0.7 recall target
+            config = best_configs[0][1]  # First available target
             print(f"  Use: {config['config']} with n_probe={config['n_probe']}")
 
 def main():
@@ -248,7 +282,7 @@ def main():
         print("❌ SIFT dataset not found! Please ensure sift/ directory exists.")
         return
     
-    tuner = HybridHNSWTuner(base_size=5000, query_size=50)  # Smaller for faster tuning
+    tuner = HybridHNSWTuner(base_size=100000, query_size=100)  # 100k base vectors for high recall testing
     tuner.grid_search()
 
 if __name__ == "__main__":
