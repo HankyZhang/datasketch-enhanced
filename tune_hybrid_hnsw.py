@@ -67,12 +67,13 @@ class HybridHNSWTuner:
         print(f"Loaded {len(self.base_vectors)} base vectors, {len(self.query_vectors)} queries")
         
     def test_configuration(self, m: int, ef_construction: int, parent_level: int, 
-                          k_children: int, test_probes: List[int], approx_ef: Optional[int] = None) -> Dict:
+                          k_children: int, test_probes: List[int], approx_ef: Optional[int] = None,
+                          diversify_max: Optional[int] = None, repair_min: Optional[int] = None) -> Dict:
         """Test a specific hybrid configuration."""
         from hnsw import HNSW
         from hybrid_hnsw import HNSWHybrid
         
-        print(f"\nTesting: m={m}, ef_c={ef_construction}, level={parent_level}, k_children={k_children}, approx_ef={approx_ef}")
+        print(f"\nTesting: m={m}, ef_c={ef_construction}, level={parent_level}, k_children={k_children}, approx_ef={approx_ef}, div_max={diversify_max}, repair_min={repair_min}")
         
         # Build base index
         distance_func = lambda x, y: np.linalg.norm(x - y)
@@ -84,14 +85,16 @@ class HybridHNSWTuner:
         base_index.update(dataset)
         base_build_time = time.time() - start_time
         
-        # Build hybrid structure with custom approx_ef
+        # Build hybrid structure with custom approx_ef and optimization parameters
         start_time = time.time()
         hybrid_index = HNSWHybrid(
             base_index=base_index,
             parent_level=parent_level,
             k_children=k_children,
             parent_child_method='exact',  # Use exact for better recall
-            approx_ef=approx_ef  # Set large approx_ef for high recall
+            approx_ef=approx_ef,  # Set large approx_ef for high recall
+            diversify_max_assignments=diversify_max,  # Control point reuse
+            repair_min_assignments=repair_min         # Ensure coverage
         )
         hybrid_build_time = time.time() - start_time
         
@@ -134,7 +137,9 @@ class HybridHNSWTuner:
                 'ef_construction': ef_construction,
                 'parent_level': parent_level,
                 'k_children': k_children,
-                'approx_ef': actual_approx_ef
+                'approx_ef': actual_approx_ef,
+                'diversify_max': diversify_max,
+                'repair_min': repair_min
             },
             'build_time': base_build_time + hybrid_build_time,
             'stats': stats,
@@ -146,22 +151,22 @@ class HybridHNSWTuner:
         print("🔍 Hybrid HNSW Parameter Grid Search")
         print("=" * 50)
         
-        # Define parameter grid - Focus on level 2 with high recall configurations
+        # Define parameter grid - Focus on level 2 with high recall and optimization configurations
         configs = [
-            # (m, ef_construction, parent_level, k_children, approx_ef)
-            (16, 400, 2, 500, 5000),     # High quality base, fewer children, large approx_ef
-            (16, 400, 2, 1000, 10000),   # High quality base, medium children, large approx_ef
-            (16, 400, 2, 2000, 20000),   # High quality base, more children, very large approx_ef
+            # (m, ef_construction, parent_level, k_children, approx_ef, diversify_max, repair_min)
+            (16, 200, 2, 500, 2000, None, None),    # Baseline without optimization
+            (16, 200, 2, 500, 2000, 3, 1),         # With diversify and repair
         ]
         
-        test_probes = [1, 2, 5, 10, 20, 50, 100, 200]  # Extended probe range for high recall
+        test_probes = [1, 2, 5, 10]  # Reduced probe range for faster testing
         all_results = []
         
         for config in configs:
-            m, ef_construction, parent_level, k_children, approx_ef = config
+            m, ef_construction, parent_level, k_children, approx_ef, diversify_max, repair_min = config
             try:
                 result = self.test_configuration(m, ef_construction, parent_level, 
-                                               k_children, test_probes, approx_ef)
+                                               k_children, test_probes, approx_ef, 
+                                               diversify_max, repair_min)
                 all_results.append(result)
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
@@ -274,7 +279,7 @@ def main():
         print("❌ SIFT dataset not found! Please ensure sift/ directory exists.")
         return
     
-    tuner = HybridHNSWTuner(base_size=100000, query_size=100)  # 100k base vectors for high recall testing
+    tuner = HybridHNSWTuner(base_size=10000, query_size=50)  # Smaller test for faster results
     tuner.grid_search()
 
 if __name__ == "__main__":
