@@ -39,7 +39,7 @@ class HNSWHybrid:
         k_children: int = 1000,
         distance_func: Optional[callable] = None,
         parent_child_method: str = 'approx',
-        approx_ef: int = 50,
+        approx_ef: Optional[int] = None,  # Now auto-computed if None
         diversify_max_assignments: Optional[int] = None,
         repair_min_assignments: Optional[int] = None,
         include_parents_in_results: bool = False,
@@ -53,15 +53,29 @@ class HNSWHybrid:
             parent_level: The HNSW level to extract parent nodes from (default: 2)
             k_children: Number of child nodes to precompute for each parent
             distance_func: Distance function (uses base index's if None)
+            approx_ef: Search width for approximate neighbor finding. If None, 
+                      auto-computed based on dataset size and k_children
         """
         self.base_index = base_index
         self.parent_level = parent_level
         self.k_children = k_children
         self.distance_func = distance_func or base_index._distance_func
 
+        # Auto-compute approx_ef if not provided
+        if approx_ef is None:
+            dataset_size = len(base_index)
+            # Adaptive formula: ensure ef is large enough for k_children but scales with dataset
+            # Base formula: max(k_children * 1.2, min(dataset_size * 0.1, k_children * 2))
+            min_ef = max(k_children + 50, int(k_children * 1.2))  # At least 20% more than k_children
+            adaptive_ef = min(int(dataset_size * 0.1), int(k_children * 2))  # Scale with dataset but cap at 2*k
+            self.approx_ef = max(min_ef, adaptive_ef)
+            print(f"Auto-computed approx_ef={self.approx_ef} (dataset_size={dataset_size}, k_children={k_children})")
+        else:
+            self.approx_ef = approx_ef
+            print(f"Using provided approx_ef={self.approx_ef}")
+
         # Extended configuration
         self.parent_child_method = parent_child_method  # 'approx' | 'brute'
-        self.approx_ef = approx_ef
         self.diversify_max_assignments = diversify_max_assignments
         self.repair_min_assignments = repair_min_assignments
         self.include_parents_in_results = include_parents_in_results
@@ -179,8 +193,10 @@ class HNSWHybrid:
                 raw.sort()
                 neighbor_ids = [nid for _, nid in raw[: self.k_children + 1]]
             else:  # approx
+                # Ensure ef is at least as large as k to get requested number of neighbors
+                effective_ef = max(self.approx_ef, self.k_children + 1)
                 try:
-                    neighbors = self.base_index.query(parent_vector, k=self.k_children + 1, ef=self.approx_ef)
+                    neighbors = self.base_index.query(parent_vector, k=self.k_children + 1, ef=effective_ef)
                 except TypeError:
                     neighbors = self.base_index.query(parent_vector, k=self.k_children + 1)
                 neighbor_ids = [nid for nid, _ in neighbors]
@@ -361,6 +377,68 @@ class HNSWHybrid:
         self.stats['avg_candidate_size'] = float(np.mean(self.candidate_sizes))
         return [(valid_ids[i], dists[i]) for i in order]
     
+    def update_approx_ef(self, new_ef: int, rebuild_mappings: bool = False):
+        """
+        Update the approx_ef parameter and optionally rebuild child mappings.
+        
+        Args:
+            new_ef: New value for approx_ef
+            rebuild_mappings: If True, rebuild parent-child mappings with new ef
+        """
+        old_ef = self.approx_ef
+        self.approx_ef = new_ef
+        print(f"Updated approx_ef from {old_ef} to {new_ef}")
+        
+        if rebuild_mappings:
+            print("Rebuilding parent-child mappings with new approx_ef...")
+            start_time = time.time()
+            # Clear existing mappings
+            self.parent_child_map.clear()
+            self.child_vectors.clear()
+            
+            # Rebuild mappings
+            self._precompute_child_mappings(self.parent_ids)
+            rebuild_time = time.time() - start_time
+            print(f"Mappings rebuilt in {rebuild_time:.2f}s")
+            
+            # Update statistics
+            self.stats['num_children'] = len(self.child_vectors)
+            self.stats['avg_children_per_parent'] = (
+                self.stats['num_children'] / self.stats['num_parents'] 
+                if self.stats['num_parents'] > 0 else 0.0
+            )
+
+    def get_recommended_ef(self, target_recall: float = 0.95) -> int:
+        """
+        Get recommended approx_ef value based on dataset characteristics.
+        
+        Args:
+            target_recall: Target recall level (0.0 to 1.0)
+            
+        Returns:
+            Recommended approx_ef value
+        """
+        dataset_size = len(self.base_index)
+        
+        # Heuristic formulas based on target recall
+        if target_recall >= 0.95:
+            # High recall: need larger search width
+            base_multiplier = 2.0
+        elif target_recall >= 0.90:
+            # Medium-high recall
+            base_multiplier = 1.5
+        else:
+            # Lower recall: can use smaller search width
+            base_multiplier = 1.2
+            
+        # Scale with dataset size and k_children
+        recommended = max(
+            int(self.k_children * base_multiplier),
+            min(int(dataset_size * 0.05), int(self.k_children * 3))
+        )
+        
+        return recommended
+
     def get_stats(self) -> Dict:
         """Get statistics including overlap diagnostics if available."""
         out = self.stats.copy()

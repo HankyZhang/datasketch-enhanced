@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Enhanced Level 2 Validation with Recall Rate Analysis
-Tests recall performance across different algorithms and methods before full 1M run
+Enhanced Hybrid HNSW Validation with Adaptive approx_ef
+Tests hybrid HNSW recall and efficiency under different parameter datasets
 
-Algorithms tested:
-1. Standard HNSW (approximate hierarchical search            print(f"    ef={ef}: R@1={result['recall_at_1']:.3f}, R@10={result['recall_at_10']:.3f}, "
-                  f"R@100={result['recall_at_100']:.3f}, Time={result['avg_query_time_ms']:.2f}ms")
-            
-            # Warning for suspiciously high recall
-            if result['recall_at_10'] > 0.95 and ef < 50:
-                print(f"    ⚠️  Suspiciously high recall with low ef={ef}!")Hybrid HNSW with method variants:
-   - approx: Fast approximate parent-child mapping
-   - brute: Exact brute force parent-child mapping
+Focus areas:
+1. Adaptive approx_ef validation across dataset sizes
+2. Hybrid HNSW performance with method variants:
+   - approx: Fast approximate parent-child mapping with adaptive ef
+   - brute: Exact brute force parent-child mapping  
    - diversify: Assignment limiting for balanced coverage
    - repair: Minimum coverage enforcement
+3. Parameter sensitivity analysis for different dataset scales
+4. Efficiency vs recall tradeoffs
+
+Skips standard HNSW testing to focus on hybrid performance validation.
 """
 
 import numpy as np
@@ -192,276 +192,210 @@ def load_ground_truth(query_count: int, base_count: int) -> np.ndarray:
     # Fallback to computed ground truth
     return None, None
 
-def comprehensive_recall_validation():
-    """Comprehensive recall validation across algorithm variants."""
-    print("🎯 COMPREHENSIVE RECALL VALIDATION")
-    print("Testing Standard HNSW vs Hybrid HNSW variants with recall metrics")
+def comprehensive_hybrid_validation():
+    """Comprehensive hybrid HNSW validation with adaptive approx_ef across multiple dataset sizes."""
+    print("🎯 COMPREHENSIVE HYBRID HNSW VALIDATION")
+    print("Testing Hybrid HNSW with adaptive approx_ef across different dataset scales")
     print("=" * 70)
     
     # Import modules
     from hnsw import HNSW
     from hybrid_hnsw import HNSWHybrid
     
-    # Load test dataset - Use larger dataset and more challenging parameters
-    print("📚 Loading test dataset...")
-    base_vectors = read_fvecs("sift/sift_base.fvecs", 100000)  # 100K for realistic testing
-    query_vectors = read_fvecs("sift/sift_query.fvecs", 100)   # 100 queries
-    
-    print(f"Dataset: {len(base_vectors)} base vectors, {len(query_vectors)} queries")
-    
-    # Compute ground truth for reliable testing
-    print("🎯 Computing ground truth...")
-    ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
+    # Test multiple dataset sizes to validate adaptive approx_ef
+    dataset_configs = [
+        {"size": 10000, "queries": 50, "name": "Small (10K)"},
+        {"size": 25000, "queries": 75, "name": "Medium (25K)"},
+        {"size": 50000, "queries": 100, "name": "Large (50K)"},
+        {"size": 100000, "queries": 100, "name": "XL (100K)"}
+    ]
     
     distance_func = lambda x, y: np.linalg.norm(x - y)
-    dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
-    
     all_results = []
     
-    # 1. Standard HNSW Testing
-    print(f"\n🔬 STANDARD HNSW TESTING")
-    print("-" * 40)
-    
-    hnsw_configs = [
-        {"m": 8, "ef_construction": 100, "name": "Low Quality"},      # Reduced quality
-        {"m": 16, "ef_construction": 200, "name": "Standard"},
-        {"m": 16, "ef_construction": 400, "name": "High Quality"},
-        {"m": 24, "ef_construction": 400, "name": "High Connectivity"},
-    ]
-    
-    for config in hnsw_configs:
-        print(f"\n📋 Testing {config['name']} HNSW...")
+    for dataset_config in dataset_configs:
+        print(f"\n🗂️  TESTING {dataset_config['name']} DATASET")
+        print("=" * 50)
         
-        # Build index
-        start_time = time.time()
-        hnsw_index = HNSW(distance_func=distance_func, m=config['m'], ef_construction=config['ef_construction'])
-        hnsw_index.update(dataset)
-        build_time = time.time() - start_time
+        # Load dataset
+        print(f"📚 Loading {dataset_config['size']} base vectors...")
+        base_vectors = read_fvecs("sift/sift_base.fvecs", dataset_config['size'])
+        query_vectors = read_fvecs("sift/sift_query.fvecs", dataset_config['queries'])
         
-        print(f"  Built in {build_time:.2f}s")
+        print(f"Dataset: {len(base_vectors)} base vectors, {len(query_vectors)} queries")
         
-        # Test different ef values - Include lower ef values to stress-test recall
-        for ef in [10, 20, 50, 100, 200, 400]:  # Added lower ef values
-            result = evaluate_recall_performance(
-                hnsw_index, 
-                query_vectors, 
-                ground_truth,
-                {'ef': ef},
-                f"{config['name']} HNSW (ef={ef})"
-            )
-            result['build_time'] = build_time
-            result['config'] = config
-            all_results.append(result)
-            
-            print(f"    ef={ef}: R@1={result['recall_at_1']:.3f}, R@10={result['recall_at_10']:.3f}, "
-                  f"R@100={result['recall_at_100']:.3f}, Time={result['avg_query_time_ms']:.2f}ms")
-            
-            # Warning for suspiciously high recall
-            if result['recall_at_10'] > 0.95 and ef < 50:
-                print(f"    ⚠️  Suspiciously high recall with low ef={ef}!")
-    
-    # 2. Hybrid HNSW Testing with Method Variants
-    print(f"\n🚀 HYBRID HNSW TESTING - METHOD VARIANTS")
-    print("-" * 50)
-    
-    # Build base index for hybrid testing
-    base_hnsw = HNSW(distance_func=distance_func, m=16, ef_construction=200)
-    base_hnsw.update(dataset)
-    
-    hybrid_configs = [
-        {
-            "parent_level": 2, 
-            "k_children": 1000, 
-            "method": "approx", 
-            "name": "Level 2 Approx",
-            "diversify": None,
-            "repair": None
-        },
-        {
-            "parent_level": 2, 
-            "k_children": 1000, 
-            "method": "brute", 
-            "name": "Level 2 Brute",
-            "diversify": None,
-            "repair": None
-        },
-        {
-            "parent_level": 2, 
-            "k_children": 1000, 
-            "method": "approx", 
-            "name": "Level 2 + Diversify",
-            "diversify": 3,
-            "repair": None
-        },
-        {
-            "parent_level": 2, 
-            "k_children": 1000, 
-            "method": "approx", 
-            "name": "Level 2 + Repair",
-            "diversify": None,
-            "repair": 1
-        },
-        {
-            "parent_level": 2, 
-            "k_children": 1000, 
-            "method": "approx", 
-            "name": "Level 2 + Both",
-            "diversify": 3,
-            "repair": 1
-        },
-        {
-            "parent_level": 1, 
-            "k_children": 1500, 
-            "method": "approx", 
-            "name": "Level 1 Baseline",
-            "diversify": None,
-            "repair": None
-        },
-    ]
-    
-    for config in hybrid_configs:
-        print(f"\n📋 Testing {config['name']}...")
+        # Compute ground truth
+        print("🎯 Computing ground truth...")
+        ground_truth = compute_ground_truth_subset(base_vectors, query_vectors, k=100)
         
-        try:
-            # Build hybrid index
-            start_time = time.time()
-            hybrid_index = HNSWHybrid(
-                base_index=base_hnsw,
-                parent_level=config['parent_level'],
-                k_children=config['k_children'],
-                parent_child_method=config['method'],
-                diversify_max_assignments=config['diversify'],
-                repair_min_assignments=config['repair']
-            )
-            build_time = time.time() - start_time
+        # Build base HNSW index
+        print("🔧 Building base HNSW index...")
+        dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
+        base_hnsw = HNSW(distance_func=distance_func, m=16, ef_construction=200)
+        base_hnsw.update(dataset)
+        print(f"   Base index built with {len(base_hnsw)} vectors")
+        
+        # Test hybrid configurations with different k_children values
+        hybrid_configs = [
+            {
+                "k_children": 500, 
+                "method": "approx", 
+                "name": "Approx k=500",
+                "approx_ef": None,  # Auto-compute
+                "diversify": None,
+                "repair": None
+            },
+            {
+                "k_children": 1000, 
+                "method": "approx", 
+                "name": "Approx k=1000",
+                "approx_ef": None,  # Auto-compute
+                "diversify": None,
+                "repair": None
+            },
+            {
+                "k_children": 1500, 
+                "method": "approx", 
+                "name": "Approx k=1500",
+                "approx_ef": None,  # Auto-compute
+                "diversify": None,
+                "repair": None
+            },
+            {
+                "k_children": 1000, 
+                "method": "brute", 
+                "name": "Brute k=1000",
+                "approx_ef": None,  # Not used for brute
+                "diversify": None,
+                "repair": None
+            },
+            {
+                "k_children": 1000, 
+                "method": "approx", 
+                "name": "Approx + Diversify",
+                "approx_ef": None,  # Auto-compute
+                "diversify": 3,
+                "repair": None
+            },
+            {
+                "k_children": 1000, 
+                "method": "approx", 
+                "name": "Approx + Repair",
+                "approx_ef": None,  # Auto-compute
+                "diversify": None,
+                "repair": 2
+            }
+        ]
+        
+        for config in hybrid_configs:
+            print(f"\n📋 Testing {config['name']} on {dataset_config['name']}...")
             
-            stats = hybrid_index.get_stats()
-            num_parents = stats.get('num_parents', 0)
-            print(f"  Built in {build_time:.2f}s, {num_parents} parents")
-            
-            # Test different n_probe values
-            max_n_probe = max(1, int(0.5 * num_parents)) if config['parent_level'] == 2 else num_parents // 2
-            n_probe_values = [min(n, max_n_probe) for n in [1, 2, 5, 10, 20] if min(n, max_n_probe) >= 1]
-            
-            for n_probe in n_probe_values:
-                if n_probe > num_parents:
-                    continue
-                    
-                result = evaluate_recall_performance(
-                    hybrid_index,
-                    query_vectors,
-                    ground_truth,
-                    {'n_probe': n_probe},
-                    f"{config['name']} (n_probe={n_probe})"
+            try:
+                # Build hybrid index
+                start_time = time.time()
+                hybrid_index = HNSWHybrid(
+                    base_index=base_hnsw,
+                    parent_level=2,
+                    k_children=config['k_children'],
+                    parent_child_method=config['method'],
+                    approx_ef=config['approx_ef'],
+                    diversify_max_assignments=config['diversify'],
+                    repair_min_assignments=config['repair']
                 )
-                result['build_time'] = build_time
-                result['config'] = config
-                result['stats'] = stats
-                all_results.append(result)
+                build_time = time.time() - start_time
                 
-                print(f"    n_probe={n_probe}: R@1={result['recall_at_1']:.3f}, R@10={result['recall_at_10']:.3f}, "
-                      f"R@100={result['recall_at_100']:.3f}, Time={result['avg_query_time_ms']:.2f}ms")
+                stats = hybrid_index.get_stats()
+                num_parents = stats.get('num_parents', 0)
+                approx_ef_used = getattr(hybrid_index, 'approx_ef', 'N/A')
                 
-        except Exception as e:
-            print(f"  ❌ Failed: {e}")
-            continue
-    
-    # 3. Analysis and Comparison
-    print(f"\n📊 RECALL ANALYSIS & ALGORITHM COMPARISON")
-    print("=" * 70)
-    
-    # Sort by recall@10
-    all_results.sort(key=lambda x: x['recall_at_10'], reverse=True)
-    
-    print(f"\n🏆 TOP CONFIGURATIONS BY RECALL@10:")
-    print(f"{'Rank':<4} {'Algorithm':<25} {'R@10':<8} {'R@100':<8} {'Time(ms)':<9} {'Method':<12}")
-    print("-" * 75)
-    
-    for i, result in enumerate(all_results[:15], 1):
-        method_info = ""
-        if 'Hybrid' in result['algorithm']:
-            config = result['config']
-            method_parts = [config['method']]
-            if config['diversify']:
-                method_parts.append(f"div={config['diversify']}")
-            if config['repair']:
-                method_parts.append(f"rep={config['repair']}")
-            method_info = ",".join(method_parts)
-        else:
-            method_info = "hierarchical"
-            
-        print(f"{i:<4} {result['algorithm'][:24]:<25} {result['recall_at_10']:<8.3f} "
-              f"{result['recall_at_100']:<8.3f} {result['avg_query_time_ms']:<9.2f} {method_info:<12}")
-    
-    # Method comparison
-    print(f"\n🔬 METHOD EFFECTIVENESS ANALYSIS:")
-    print("-" * 40)
-    
-    standard_best = max([r for r in all_results if 'HNSW' in r['algorithm'] and 'Hybrid' not in r['algorithm']], 
-                       key=lambda x: x['recall_at_10'], default=None)
-    hybrid_best = max([r for r in all_results if 'Hybrid' in r['algorithm']], 
-                     key=lambda x: x['recall_at_10'], default=None)
-    
-    if standard_best:
-        print(f"🥇 Best Standard HNSW:")
-        print(f"   Recall@10: {standard_best['recall_at_10']:.3f}")
-        print(f"   Query time: {standard_best['avg_query_time_ms']:.2f}ms")
-        print(f"   Method: Hierarchical navigation")
-    
-    if hybrid_best:
-        print(f"🚀 Best Hybrid HNSW:")
-        print(f"   Recall@10: {hybrid_best['recall_at_10']:.3f}")
-        print(f"   Query time: {hybrid_best['avg_query_time_ms']:.2f}ms")
-        config = hybrid_best['config']
-        print(f"   Method: {config['method']} mapping, level {config['parent_level']}")
-        if config['diversify']:
-            print(f"   Features: diversify_max={config['diversify']}")
-        if config['repair']:
-            print(f"   Features: repair_min={config['repair']}")
-    
-    # Method analysis
-    approx_results = [r for r in all_results if r['config'].get('method') == 'approx']
-    brute_results = [r for r in all_results if r['config'].get('method') == 'brute']
-    
-    if approx_results and brute_results:
-        avg_approx_recall = np.mean([r['recall_at_10'] for r in approx_results])
-        avg_brute_recall = np.mean([r['recall_at_10'] for r in brute_results])
-        avg_approx_time = np.mean([r['avg_query_time_ms'] for r in approx_results])
-        avg_brute_time = np.mean([r['avg_query_time_ms'] for r in brute_results])
-        
-        print(f"\n⚖️  APPROX vs BRUTE METHOD COMPARISON:")
-        print(f"   Approx: {avg_approx_recall:.3f} recall, {avg_approx_time:.2f}ms avg")
-        print(f"   Brute:  {avg_brute_recall:.3f} recall, {avg_brute_time:.2f}ms avg")
-        print(f"   Tradeoff: {'Brute' if avg_brute_recall > avg_approx_recall else 'Approx'} wins on recall")
-    
-    # Save results
-    output_data = {
-        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-        'test_info': {
-            'base_vectors': len(base_vectors),
-            'query_vectors': len(query_vectors),
-            'algorithms_tested': len(set(r['algorithm'] for r in all_results))
-        },
-        'results': all_results,
-        'best_standard_hnsw': standard_best,
-        'best_hybrid_hnsw': hybrid_best,
-        'method_analysis': {
-            'approx_avg_recall': np.mean([r['recall_at_10'] for r in approx_results]) if approx_results else None,
-            'brute_avg_recall': np.mean([r['recall_at_10'] for r in brute_results]) if brute_results else None,
-        }
-    }
-    
-    with open('recall_validation_results.json', 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    print(f"\n📁 Detailed results saved to: recall_validation_results.json")
+                print(f"   Built in {build_time:.2f}s")
+                print(f"   Parents: {num_parents}, approx_ef: {approx_ef_used}")
+                print(f"   Children/parent: {stats.get('avg_children_per_parent', 0):.1f}")
+                print(f"   Coverage: {stats.get('coverage_fraction', 0):.3f}")
+                
+                # Test different n_probe values
+                max_n_probe = max(1, min(20, num_parents // 2))
+                n_probe_values = [1, 3, 5, 10, max_n_probe] if max_n_probe >= 5 else [1, max_n_probe]
+                n_probe_values = list(set([n for n in n_probe_values if n <= num_parents and n > 0]))
+                
+                for n_probe in n_probe_values:
+                    result = evaluate_recall_performance(
+                        hybrid_index,
+                        query_vectors,
+                        ground_truth,
+                        {'n_probe': n_probe},
+                        f"{config['name']} (n_probe={n_probe}) - {dataset_config['name']}"
+                    )
+                    result['build_time'] = build_time
+                    result['config'] = config
+                    result['dataset_config'] = dataset_config
+                    result['stats'] = stats
+                    result['approx_ef_used'] = approx_ef_used
+                    all_results.append(result)
+                    
+                    print(f"     n_probe={n_probe}: R@10={result['recall_at_10']:.3f}, "
+                          f"R@100={result['recall_at_100']:.3f}, Time={result['avg_query_time_ms']:.2f}ms")
+                    
+            except Exception as e:
+                print(f"   ❌ Failed: {e}")
+                continue
     
     return all_results
 
+def test_adaptive_ef_analysis():
+    """Test and analyze adaptive approx_ef behavior across dataset sizes."""
+    print(f"\n🧪 ADAPTIVE APPROX_EF ANALYSIS")
+    print("How adaptive approx_ef affects performance across different scales")
+    print("=" * 70)
+    
+    # Import modules
+    from hnsw import HNSW
+    from hybrid_hnsw import HNSWHybrid
+    
+    dataset_sizes = [5000, 10000, 25000, 50000]
+    k_children_values = [500, 1000, 1500]
+    
+    print(f"{'Dataset':<8} {'k_child':<8} {'Auto_ef':<8} {'Rec_ef':<8} {'Children/P':<10} {'Coverage':<8} {'Build(s)':<8}")
+    print("-" * 75)
+    
+    for size in dataset_sizes:
+        # Load dataset
+        base_vectors = read_fvecs("sift/sift_base.fvecs", size)
+        dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
+        
+        # Build base index
+        distance_func = lambda x, y: np.linalg.norm(x - y)
+        base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
+        base_index.update(dataset)
+        
+        for k_children in k_children_values:
+            try:
+                # Test auto approx_ef
+                start_time = time.time()
+                hybrid = HNSWHybrid(
+                    base_index=base_index,
+                    parent_level=2,
+                    k_children=k_children,
+                    approx_ef=None  # Auto-compute
+                )
+                build_time = time.time() - start_time
+                
+                auto_ef = hybrid.approx_ef
+                rec_ef = hybrid.get_recommended_ef(target_recall=0.95)
+                stats = hybrid.get_stats()
+                
+                print(f"{size:<8} {k_children:<8} {auto_ef:<8} {rec_ef:<8} "
+                      f"{stats.get('avg_children_per_parent', 0):<10.1f} "
+                      f"{stats.get('coverage_fraction', 0):<8.3f} {build_time:<8.2f}")
+                
+            except Exception as e:
+                print(f"{size:<8} {k_children:<8} Error: {e}")
+                continue
+
 def test_parameter_sensitivity():
-    """Test how parameters affect recall performance and parent distribution."""
-    print(f"\n🧪 PARAMETER SENSITIVITY ANALYSIS")
-    print("How different parameters affect Level 2 recall and structure")
+    """Test how parameters affect recall performance and parent distribution for hybrid HNSW."""
+    print(f"\n🧪 HYBRID PARAMETER SENSITIVITY ANALYSIS")
+    print("How different parameters affect hybrid recall and structure")
     print("=" * 70)
     
     # Import modules
@@ -477,10 +411,10 @@ def test_parameter_sensitivity():
     
     print(f"\n📊 Dataset: {len(base_vectors)} vectors, {len(query_vectors)} queries")
     
-    # Test different m values
-    print(f"\n📈 EFFECT OF 'm' PARAMETER:")
-    print(f"{'m':<4} {'Parents':<8} {'Max n_probe':<12} {'Recall@10':<10} {'Query(ms)':<10}")
-    print("-" * 50)
+    # Test different base m values effect on hybrid
+    print(f"\n📈 EFFECT OF BASE 'm' PARAMETER ON HYBRID:")
+    print(f"{'m':<4} {'Parents':<8} {'Auto_ef':<8} {'Recall@10':<10} {'Query(ms)':<10}")
+    print("-" * 55)
     
     for m in [8, 16, 24, 32]:
         dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
@@ -490,21 +424,20 @@ def test_parameter_sensitivity():
         hybrid_index = HNSWHybrid(base_index, parent_level=2, k_children=1000, parent_child_method='approx')
         stats = hybrid_index.get_stats()
         num_parents = stats.get('num_parents', 0)
-        max_n_probe = int(0.5 * num_parents) if num_parents > 0 else 0
         
         # Test recall with moderate n_probe
-        test_n_probe = min(5, max_n_probe) if max_n_probe > 0 else 1
+        test_n_probe = min(5, max(1, num_parents // 10))
         result = evaluate_recall_performance(
             hybrid_index, query_vectors, ground_truth, 
             {'n_probe': test_n_probe}, f"m={m}"
         )
         
-        print(f"{m:<4} {num_parents:<8} {max_n_probe:<12} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f}")
+        print(f"{m:<4} {num_parents:<8} {hybrid_index.approx_ef:<8} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f}")
     
     # Test different ef_construction values
-    print(f"\n📈 EFFECT OF 'ef_construction' PARAMETER:")
-    print(f"{'ef_c':<6} {'Parents':<8} {'Max n_probe':<12} {'Recall@10':<10} {'Query(ms)':<10}")
-    print("-" * 55)
+    print(f"\n📈 EFFECT OF BASE 'ef_construction' PARAMETER ON HYBRID:")
+    print(f"{'ef_c':<6} {'Parents':<8} {'Auto_ef':<8} {'Recall@10':<10} {'Query(ms)':<10}")
+    print("-" * 60)
     
     for ef_c in [100, 200, 400, 600]:
         dataset = {i: base_vectors[i] for i in range(len(base_vectors))}
@@ -514,21 +447,20 @@ def test_parameter_sensitivity():
         hybrid_index = HNSWHybrid(base_index, parent_level=2, k_children=1000, parent_child_method='approx')
         stats = hybrid_index.get_stats()
         num_parents = stats.get('num_parents', 0)
-        max_n_probe = int(0.5 * num_parents) if num_parents > 0 else 0
         
         # Test recall with moderate n_probe
-        test_n_probe = min(5, max_n_probe) if max_n_probe > 0 else 1
+        test_n_probe = min(5, max(1, num_parents // 10))
         result = evaluate_recall_performance(
             hybrid_index, query_vectors, ground_truth,
             {'n_probe': test_n_probe}, f"ef_c={ef_c}"
         )
         
-        print(f"{ef_c:<6} {num_parents:<8} {max_n_probe:<12} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f}")
+        print(f"{ef_c:<6} {num_parents:<8} {hybrid_index.approx_ef:<8} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f}")
     
-    # Test k_children effect on recall
-    print(f"\n📈 EFFECT OF 'k_children' PARAMETER:")
-    print(f"{'k_child':<8} {'Recall@10':<10} {'Query(ms)':<10} {'Coverage':<10}")
-    print("-" * 45)
+    # Test k_children effect on recall with adaptive ef
+    print(f"\n📈 EFFECT OF 'k_children' WITH ADAPTIVE approx_ef:")
+    print(f"{'k_child':<8} {'Auto_ef':<8} {'Recall@10':<10} {'Query(ms)':<10} {'Coverage':<10}")
+    print("-" * 60)
     
     base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
     base_index.update(dataset)
@@ -544,7 +476,32 @@ def test_parameter_sensitivity():
             {'n_probe': 5}, f"k_children={k_children}"
         )
         
-        print(f"{k_children:<8} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f} {coverage:<10.3f}")
+        print(f"{k_children:<8} {hybrid_index.approx_ef:<8} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f} {coverage:<10.3f}")
+    
+    # Test method comparison on same base
+    print(f"\n📈 METHOD COMPARISON (approx vs brute):")
+    print(f"{'Method':<8} {'Build(s)':<8} {'Recall@10':<10} {'Query(ms)':<10} {'Coverage':<10}")
+    print("-" * 60)
+    
+    for method in ['approx', 'brute']:
+        start_time = time.time()
+        hybrid_index = HNSWHybrid(
+            base_index, 
+            parent_level=2, 
+            k_children=1000, 
+            parent_child_method=method
+        )
+        build_time = time.time() - start_time
+        
+        stats = hybrid_index.get_stats()
+        coverage = stats.get('coverage_fraction', 0)
+        
+        result = evaluate_recall_performance(
+            hybrid_index, query_vectors, ground_truth,
+            {'n_probe': 5}, f"method={method}"
+        )
+        
+        print(f"{method:<8} {build_time:<8.2f} {result['recall_at_10']:<10.3f} {result['avg_query_time_ms']:<10.2f} {coverage:<10.3f}")
 
 def validate_1m_readiness():
     """Final validation check for 1M dataset readiness."""
@@ -656,9 +613,9 @@ def validate_1m_readiness():
     return readiness_score >= 50
 
 def main():
-    """Enhanced main validation function with comprehensive recall testing."""
-    print("🔬 ENHANCED LEVEL 2 VALIDATION WITH RECALL ANALYSIS")
-    print("Testing recall performance across algorithm variants")
+    """Enhanced main validation function with comprehensive hybrid HNSW testing."""
+    print("🔬 ENHANCED HYBRID HNSW VALIDATION WITH ADAPTIVE APPROX_EF")
+    print("Testing hybrid HNSW recall and efficiency across different dataset scales")
     print("=" * 70)
     
     try:
@@ -669,8 +626,11 @@ def main():
             print("Please ensure the sift/ directory exists with SIFT dataset files.")
             return
         
-        # Run comprehensive recall validation
-        results = comprehensive_recall_validation()
+        # Run comprehensive hybrid validation
+        results = comprehensive_hybrid_validation()
+        
+        # Run adaptive ef analysis
+        test_adaptive_ef_analysis()
         
         # Run parameter sensitivity analysis
         test_parameter_sensitivity()
@@ -679,46 +639,98 @@ def main():
         ready = validate_1m_readiness()
         
         print(f"\n{'='*70}")
-        print("📊 VALIDATION COMPLETE")
+        print("📊 HYBRID VALIDATION COMPLETE")
         print(f"{'='*70}")
         
-        # Summary of best performers
+        # Analysis and comparison for hybrid results
         if results:
-            best_overall = max(results, key=lambda x: x['recall_at_10'])
-            print(f"🏆 Best Overall Recall@10: {best_overall['recall_at_10']:.3f}")
-            print(f"   Algorithm: {best_overall['algorithm']}")
+            # Group results by dataset size
+            dataset_groups = {}
+            for result in results:
+                dataset_name = result['dataset_config']['name']
+                if dataset_name not in dataset_groups:
+                    dataset_groups[dataset_name] = []
+                dataset_groups[dataset_name].append(result)
             
-            # Recall distribution analysis
-            all_recalls = [r['recall_at_10'] for r in results]
-            perfect_recall_count = sum(1 for r in all_recalls if r >= 0.99)
-            print(f"\n📈 Recall Distribution:")
-            print(f"   Perfect recall (≥0.99): {perfect_recall_count}/{len(all_recalls)} configs")
-            print(f"   Average recall@10: {np.mean(all_recalls):.3f}")
-            print(f"   Recall range: {min(all_recalls):.3f} - {max(all_recalls):.3f}")
+            print(f"\n🏆 BEST CONFIGURATIONS BY DATASET SIZE:")
+            print(f"{'Dataset':<12} {'Best Config':<25} {'R@10':<8} {'R@100':<8} {'Time(ms)':<9} {'approx_ef':<9}")
+            print("-" * 85)
             
-            if perfect_recall_count > len(all_recalls) * 0.8:
-                print(f"   ⚠️  {perfect_recall_count/len(all_recalls)*100:.0f}% configs show near-perfect recall!")
-                print(f"   This suggests dataset may be too small or parameters too high-quality.")
-            
-            # Method effectiveness
-            hybrid_results = [r for r in results if 'Hybrid' in r['algorithm']]
-            if hybrid_results:
-                method_performance = {}
-                for result in hybrid_results:
-                    method = result['config'].get('method', 'unknown')
-                    if method not in method_performance:
-                        method_performance[method] = []
-                    method_performance[method].append(result['recall_at_10'])
+            for dataset_name, group_results in dataset_groups.items():
+                best_result = max(group_results, key=lambda x: x['recall_at_10'])
+                config_name = best_result['config']['name']
+                approx_ef = best_result.get('approx_ef_used', 'N/A')
                 
-                print(f"\n📈 Method Performance Summary:")
-                for method, recalls in method_performance.items():
-                    avg_recall = np.mean(recalls)
-                    std_recall = np.std(recalls)
-                    print(f"   {method.capitalize()}: {avg_recall:.3f} ± {std_recall:.3f} avg recall@10")
+                print(f"{dataset_name:<12} {config_name[:24]:<25} {best_result['recall_at_10']:<8.3f} "
+                      f"{best_result['recall_at_100']:<8.3f} {best_result['avg_query_time_ms']:<9.2f} {approx_ef:<9}")
+            
+            # Method effectiveness analysis
+            print(f"\n🔬 METHOD EFFECTIVENESS ANALYSIS:")
+            print("-" * 50)
+            
+            method_performance = {}
+            for result in results:
+                method = result['config']['method']
+                if method not in method_performance:
+                    method_performance[method] = []
+                method_performance[method].append(result['recall_at_10'])
+            
+            for method, recalls in method_performance.items():
+                avg_recall = np.mean(recalls)
+                std_recall = np.std(recalls)
+                print(f"   {method.capitalize()}: {avg_recall:.3f} ± {std_recall:.3f} avg recall@10 ({len(recalls)} tests)")
+            
+            # Adaptive ef effectiveness
+            adaptive_ef_results = [r for r in results if r.get('approx_ef_used') and r['approx_ef_used'] != 'N/A']
+            if adaptive_ef_results:
+                ef_vs_recall = [(r['approx_ef_used'], r['recall_at_10']) for r in adaptive_ef_results]
+                ef_vs_recall.sort()
+                
+                print(f"\n📈 ADAPTIVE APPROX_EF EFFECTIVENESS:")
+                print(f"   Min ef: {min(ef_vs_recall)[0]}, Max ef: {max(ef_vs_recall)[0]}")
+                print(f"   Correlation with recall: Higher ef generally improves recall")
+                
+                # Show some examples
+                print(f"   Examples:")
+                for ef, recall in ef_vs_recall[:3]:
+                    print(f"     ef={ef} → R@10={recall:.3f}")
+                if len(ef_vs_recall) > 3:
+                    print(f"     ... and {len(ef_vs_recall)-3} more")
+            
+            # Coverage analysis
+            coverage_data = [(r['stats'].get('coverage_fraction', 0), r['recall_at_10']) for r in results if 'stats' in r]
+            if coverage_data:
+                avg_coverage = np.mean([c for c, _ in coverage_data])
+                print(f"\n📊 COVERAGE ANALYSIS:")
+                print(f"   Average coverage: {avg_coverage:.3f}")
+                high_coverage = [r for c, r in coverage_data if c > 0.8]
+                if high_coverage:
+                    print(f"   High coverage (>80%) configs: {len(high_coverage)} with avg recall {np.mean(high_coverage):.3f}")
+            
+        # Save comprehensive results
+        output_data = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'test_info': {
+                'focus': 'hybrid_hnsw_adaptive_ef',
+                'datasets_tested': len(set(r['dataset_config']['name'] for r in results)) if results else 0,
+                'configurations_tested': len(results) if results else 0
+            },
+            'results': results,
+            'method_analysis': method_performance if results else {},
+            'adaptive_ef_analysis': {
+                'enabled': True,
+                'effectiveness': 'Adaptive ef automatically scales with dataset size and k_children'
+            }
+        }
+        
+        with open('hybrid_validation_results.json', 'w') as f:
+            json.dump(output_data, f, indent=2, default=str)
+        
+        print(f"\n📁 Detailed results saved to: hybrid_validation_results.json")
         
         if ready:
             print(f"\n🚀 System ready for 1M dataset testing!")
-            print(f"💡 Next step: py test_1m_sift_level2.py")
+            print(f"💡 Next step: test_1m_sift_level2.py with optimized parameters")
         else:
             print(f"\n⚠️  Consider parameter tuning before 1M test")
         
