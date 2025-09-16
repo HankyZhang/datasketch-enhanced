@@ -239,25 +239,42 @@ class HNSWHybrid:
 
         # Repair phase: ensure every child that appears too few times is assigned to closest parents
         if self.repair_min_assignments and assignment_counts is not None:
+            # Find nodes with low coverage (already assigned but less than min)
             low_coverage = [nid for nid, c in assignment_counts.items() if c < self.repair_min_assignments]
-            if low_coverage:
-                print(f"Repairing {len(low_coverage)} low-coverage points (min={self.repair_min_assignments})...")
+            
+            # Find completely unassigned nodes (not in assignment_counts at all)
+            all_base_nodes = set(self.base_index._nodes.keys()) if hasattr(self.base_index, '_nodes') else set()
+            assigned_nodes = set(assignment_counts.keys())
+            unassigned_nodes = list(all_base_nodes - assigned_nodes - set(self.parent_ids))  # Exclude parent nodes
+            
+            # Combine low coverage and unassigned nodes
+            nodes_to_repair = low_coverage + unassigned_nodes
+            
+            if nodes_to_repair:
+                print(f"Repairing {len(low_coverage)} low-coverage + {len(unassigned_nodes)} unassigned points (min={self.repair_min_assignments})...")
                 # Build parent matrix if absent
                 if self._parent_matrix is None:
                     self._build_parent_index()
                 P = self._parent_matrix.shape[0]
-                for nid in low_coverage:
-                    vec = self.base_index[nid]
-                    diffs = self._parent_matrix - vec
-                    dists = np.linalg.norm(diffs, axis=1)
-                    order = np.argsort(dists)
-                    for idx in order:
-                        pid = self.parent_ids[idx]
-                        if nid not in self.parent_child_map[pid]:
-                            self.parent_child_map[pid].append(nid)
-                            assignment_counts[nid] += 1
-                        if assignment_counts[nid] >= self.repair_min_assignments:
-                            break
+                for nid in nodes_to_repair:
+                    try:
+                        vec = self.base_index[nid]
+                        diffs = self._parent_matrix - vec
+                        dists = np.linalg.norm(diffs, axis=1)
+                        order = np.argsort(dists)
+                        for idx in order:
+                            pid = self.parent_ids[idx]
+                            if nid not in self.parent_child_map[pid]:
+                                self.parent_child_map[pid].append(nid)
+                                assignment_counts[nid] += 1
+                                # Add to child_vectors if not already present
+                                if nid not in self.child_vectors:
+                                    self.child_vectors[nid] = vec
+                            if assignment_counts[nid] >= self.repair_min_assignments:
+                                break
+                    except Exception as e:
+                        print(f"[WARN] Failed to repair node {nid}: {e}")
+                        continue
 
         # Coverage & overlap stats
         self._compute_mapping_diagnostics()
