@@ -44,8 +44,11 @@ def compute_ground_truth(base_vectors: np.ndarray, query_vectors: np.ndarray, k:
     ground_truth = []
     for i, query in enumerate(query_vectors):
         distances = np.linalg.norm(base_vectors - query, axis=1)
-        nearest_indices = np.argpartition(distances, k)[:k]
-        nearest_indices = nearest_indices[np.argsort(distances[nearest_indices])]
+        # Use argsort for simplicity and correctness - it's still fast for this use case
+        sorted_indices = np.argsort(distances)
+        # Take the first k indices (closest neighbors)
+        k_actual = min(k, len(base_vectors))
+        nearest_indices = sorted_indices[:k_actual]
         ground_truth.append(nearest_indices)
     
     return np.array(ground_truth)
@@ -85,6 +88,9 @@ class HybridHNSWTuner:
         base_index.update(dataset)
         base_build_time = time.time() - start_time
         
+        print(f"  📊 Dataset size: {len(self.base_vectors)}, Base index built in {base_build_time:.2f}s")
+        print(f"  🔧 Input approx_ef: {approx_ef} (None means auto-compute)")
+        
         # Build hybrid structure with custom approx_ef and optimization parameters
         start_time = time.time()
         hybrid_index = HNSWHybrid(
@@ -100,7 +106,13 @@ class HybridHNSWTuner:
         
         stats = hybrid_index.get_stats()
         actual_approx_ef = stats.get('approx_ef', hybrid_index.approx_ef)
-        print(f"  Built: {stats.get('num_parents', 0)} parents, {stats.get('num_children', 0)} children, approx_ef={actual_approx_ef}")
+        print(f"  ✅ Actual approx_ef used: {actual_approx_ef}")
+        print(f"  📈 Built: {stats.get('num_parents', 0)} parents, {stats.get('num_children', 0)} children")
+        print(f"  📊 Coverage: {stats.get('coverage_fraction', 0):.4f}")
+        if repair_min:
+            print(f"  🔧 Repair enabled (min={repair_min})")
+        if diversify_max:
+            print(f"  🎯 Diversification enabled (max={diversify_max})")
         
         # Test different n_probe values
         results = []
@@ -279,7 +291,7 @@ def main():
         print("❌ SIFT dataset not found! Please ensure sift/ directory exists.")
         return
     
-    tuner = HybridHNSWTuner(base_size=10000, query_size=50)  # Smaller test for faster results
+    tuner = HybridHNSWTuner(base_size=100000, query_size=100)  # Production configuration
     tuner.grid_search()
 
 if __name__ == "__main__":
