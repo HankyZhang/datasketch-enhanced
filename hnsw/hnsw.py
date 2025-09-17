@@ -1035,8 +1035,11 @@ class HNSW(MutableMapping):
 
             # 早期终止：如果最近的候选比我们最差的结果更远，
             # 我们无法进一步改善结果
-            closet_dist = -entry_points[0][0]  # 到迄今为止最差结果的距离
-            if dist > closet_dist:
+            worst_dist = -entry_points[0][0]  # 当前结果集中最差(最大)距离
+            # FIX: 之前的实现无论是否已达到ef都会提前终止，导致结果数量
+            # 被错误限制在 ~m0 (+/- 少量)。只有在我们已经收集到 ef 个候选
+            # 时才允许根据该条件提前终止。
+            if dist > worst_dist and len(entry_points) >= ef:
                 break
                 
             # 获取当前节点的所有未访问邻居
@@ -1056,19 +1059,19 @@ class HNSW(MutableMapping):
                     p == key_to_hard_delete
                 ):
                     # 如果邻居被删除但仍然足够接近，探索其邻居
-                    if dist <= closet_dist:
+                    if dist <= worst_dist:
                         heapq.heappush(candidates, (dist, p))
                 elif len(entry_points) < ef:
                     # 我们还没有找到足够的结果，添加此邻居
                     heapq.heappush(candidates, (dist, p))
                     heapq.heappush(entry_points, (-dist, p))  # 负值用于最大堆
-                    closet_dist = -entry_points[0][0]  # 更新最差距离
-                elif dist <= closet_dist:
+                    worst_dist = -entry_points[0][0]  # 更新最差距离
+                elif dist <= worst_dist:
                     # 我们有足够的结果，但此邻居比我们最差的更好
                     heapq.heappush(candidates, (dist, p))
                     # 用这个更好的结果替换最差的结果
                     heapq.heapreplace(entry_points, (-dist, p))
-                    closet_dist = -entry_points[0][0]  # 更新最差距离
+                    worst_dist = -entry_points[0][0]  # 更新最差距离
 
         return entry_points
 

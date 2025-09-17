@@ -423,28 +423,36 @@ def load_sift_data():
     sift_dir = os.path.join(os.path.dirname(__file__), '..', 'sift')
     
     try:
-        # Load SIFT base vectors
+        def read_fvecs(path: str, max_vectors: Optional[int] = None) -> np.ndarray:
+            """Read .fvecs file (FAISS format). Each vector stored as: int32 dim + dim float32.
+            This implementation avoids mis-parsing by reading int32 header first.
+            """
+            if not os.path.exists(path):
+                raise FileNotFoundError(path)
+            raw = np.fromfile(path, dtype=np.int32)
+            if raw.size == 0:
+                raise ValueError(f"Empty fvecs file: {path}")
+            dim = raw[0]
+            if dim <= 0 or dim > 4096:
+                raise ValueError(f"Unreasonable vector dimension {dim} parsed from {path}")
+            record_size = dim + 1
+            count = raw.size // record_size
+            raw = raw.reshape(count, record_size)
+            vecs = raw[:, 1:].astype(np.float32)
+            if max_vectors is not None and count > max_vectors:
+                vecs = vecs[:max_vectors]
+            return vecs
+
         base_path = os.path.join(sift_dir, 'sift_base.fvecs')
-        if os.path.exists(base_path):
-            base_vectors = np.fromfile(base_path, dtype=np.float32)
-            d = base_vectors[0].astype(int)
-            base_vectors = base_vectors[1:].reshape(-1, d + 1)[:, 1:]
-        else:
-            raise FileNotFoundError(f"SIFT base file not found: {base_path}")
-        
-        # Load SIFT query vectors
         query_path = os.path.join(sift_dir, 'sift_query.fvecs')
-        if os.path.exists(query_path):
-            query_vectors = np.fromfile(query_path, dtype=np.float32)
-            d = query_vectors[0].astype(int)
-            query_vectors = query_vectors[1:].reshape(-1, d + 1)[:, 1:]
-        else:
-            raise FileNotFoundError(f"SIFT query file not found: {query_path}")
-        
+
+        # Limit for tuning demo to keep runtime reasonable
+        base_vectors = read_fvecs(base_path, max_vectors=50000)
+        query_vectors = read_fvecs(query_path, max_vectors=1000)
+
         print(f"Loaded SIFT data: {base_vectors.shape[0]} base vectors, "
-              f"{query_vectors.shape[0]} query vectors, "
-              f"dimension {base_vectors.shape[1]}")
-        
+              f"{query_vectors.shape[0]} query vectors, dimension {base_vectors.shape[1]}")
+
         return base_vectors, query_vectors
     
     except Exception as e:
@@ -466,7 +474,9 @@ if __name__ == "__main__":
         query_vectors = np.random.randn(100, 128).astype(np.float32)
     
     # Use first 100 queries for efficiency
-    query_vectors = query_vectors[:100]
+    base_vectors = base_vectors[:5000]
+    print("len_base_vectors", len(base_vectors))
+    query_vectors = query_vectors[:10]
     query_ids = list(range(len(query_vectors)))
     
     # Distance function
@@ -474,7 +484,7 @@ if __name__ == "__main__":
     
     # Build base HNSW index
     print("Building base HNSW index...")
-    base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
+    base_index = HNSW(distance_func=distance_func, m=16, ef_construction=100)
     
     for i, vector in enumerate(base_vectors):
         base_index.insert(i, vector)
@@ -488,9 +498,9 @@ if __name__ == "__main__":
     
     # Define parameter grid for sweep
     param_grid = {
-        'n_clusters': [20, 50, 100],
-        'k_children': [500, 1000, 2000],
-        'child_search_ef': [100, 200, 400]
+        'n_clusters': [10],
+        'k_children': [500],
+        'child_search_ef': [500]
     }
     
     evaluation_params = {
