@@ -57,6 +57,7 @@ setup(
     packages=find_packages(include=['hnsw*', 'hybrid_hnsw*', 'optimized_hnsw*']),
     install_requires=[
         'numpy>=1.11',
+        'scikit-learn>=0.24',  # Added for MiniBatchKMeans in method3
     ],
     extras_require={
         'benchmark': [

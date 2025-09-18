@@ -2,6 +2,8 @@
 
 🚀 **Advanced HNSW implementation with hybrid two-stage retrieval architecture**
 
+> Update: K-Means based components (Method 3 / two-stage variants) now use sklearn `MiniBatchKMeans` instead of the previous custom implementation for improved stability and faster construction on large datasets.
+
 A high-performance implementation of the HNSW (Hierarchical Navigable Small World) algorithm featuring an innovative hybrid two-stage retrieval system that significantly improves recall performance.
 
 ## 🆕 Latest: HNSW Hybrid Two-Stage System
@@ -170,11 +172,13 @@ python test_structure.py
 ```
 
 ### Parameter Tuning
-The hybrid system supports several key parameters:
+The hybrid (parent_level based) and the MiniBatchKMeans + HNSW (Method 3) systems support these key parameters:
 
-- **`parent_level`**: HNSW level to extract parent nodes from (default: 2)
+- **`parent_level`** (hybrid variant only): HNSW level to extract parent nodes from (default: 2)
+- **`n_clusters`** (KMeansHNSW): Number of MiniBatchKMeans clusters (acts as parents)
 - **`k_children`**: Number of child nodes per parent (default: 1000)
-- **`n_probe`**: Number of parent nodes to probe during search (default: 15)
+- **`n_probe`**: Number of parent nodes / centroids to probe during search (default: 15)
+- **MiniBatchKMeans params** via `kmeans_params`: `max_iter`, `n_init`, `batch_size`, `tol`, `random_state`
 
 ## 📊 Performance Results
 
@@ -213,4 +217,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-Built on the foundation of the original HNSW algorithm with innovative hybrid architecture enhancements for improved recall performance.
+Built on the foundation of the original HNSW algorithm with innovative hybrid architecture enhancements and MiniBatchKMeans integration for improved recall and construction efficiency.

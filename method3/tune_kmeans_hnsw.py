@@ -17,7 +17,8 @@ from itertools import product
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from method3.kmeans_hnsw import KMeansHNSW
 from hnsw.hnsw import HNSW
-from kmeans.kmeans import KMeans
+# Switch to sklearn MiniBatchKMeans for pure k-means baseline
+from sklearn.cluster import MiniBatchKMeans
 
 
 class KMeansHNSWEvaluator:
@@ -173,6 +174,90 @@ class KMeansHNSWEvaluator:
             'n_probe': n_probe,
             'system_stats': kmeans_hnsw.get_stats()
         }
+
+    # -------------------- Phase-Specific Evaluations --------------------
+    def evaluate_hnsw_baseline(
+        self,
+        base_index: HNSW,
+        k: int,
+        ef: int,
+        ground_truth: Dict
+    ) -> Dict[str, Any]:
+        """Evaluate recall using ONLY the base HNSW index (Phase 1)."""
+        query_times = []
+        total_correct = 0
+        total_expected = len(self.query_set) * k
+        for query_vector, query_id in zip(self.query_set, self.query_ids):
+            true_neighbors = {nid for _, nid in ground_truth[query_id]}
+            t0 = time.time()
+            results = base_index.query(query_vector, k=k, ef=ef)
+            dt = time.time() - t0
+            query_times.append(dt)
+            found = {nid for nid, _ in results}
+            total_correct += len(true_neighbors & found)
+        return {
+            'phase': 'baseline_hnsw',
+            'ef': ef,
+            'recall_at_k': total_correct / total_expected if total_expected else 0.0,
+            'avg_query_time_ms': float(np.mean(query_times) * 1000),
+            'total_correct': total_correct,
+            'total_expected': total_expected
+        }
+
+    def evaluate_clusters_only(
+        self,
+        kmeans_model: Any,
+        dataset: np.ndarray,
+        k: int,
+        ground_truth: Dict
+    ) -> Dict[str, Any]:
+        """Evaluate recall using ONLY KMeans clusters (Phase 2) without child mapping.
+        Strategy: For each query pick nearest centroid, restrict to its members, pick top-k by L2.
+        """
+        if not hasattr(kmeans_model, 'cluster_centers_') or not hasattr(kmeans_model, 'labels_'):
+            raise ValueError("KMeans model must be fitted with cluster_centers_ and labels_ available")
+        centers = kmeans_model.cluster_centers_
+        labels = kmeans_model.labels_
+        n_clusters = centers.shape[0]
+        # Build inverse index: cluster -> indices
+        clusters = [[] for _ in range(n_clusters)]
+        for idx, c in enumerate(labels):
+            clusters[c].append(idx)
+        query_times = []
+        total_correct = 0
+        total_expected = len(self.query_set) * k
+        individual_recalls = []
+        for qvec, qid in zip(self.query_set, self.query_ids):
+            t0 = time.time()
+            d2c = np.linalg.norm(centers - qvec, axis=1)
+            cidx = int(np.argmin(d2c))
+            member_ids = clusters[cidx]
+            if member_ids:
+                member_vecs = dataset[member_ids]
+                dists = np.linalg.norm(member_vecs - qvec, axis=1)
+                # exclude identical id if present
+                pairs = [(float(dist), int(mid)) for dist, mid in zip(dists, member_ids) if mid != qid]
+                pairs.sort(key=lambda x: x[0])
+                results = pairs[:k]
+                found = {mid for _, mid in results}
+            else:
+                found = set()
+            query_times.append(time.time() - t0)
+            true_neighbors = {nid for _, nid in ground_truth[qid]}
+            correct = len(true_neighbors & found)
+            total_correct += correct
+            individual_recalls.append(correct / k if k else 0.0)
+        overall = total_correct / total_expected if total_expected else 0.0
+        return {
+            'phase': 'clusters_only',
+            'recall_at_k': overall,
+            'avg_query_time_ms': float(np.mean(query_times) * 1000),
+            'std_query_time_ms': float(np.std(query_times) * 1000),
+            'total_correct': total_correct,
+            'total_expected': total_expected,
+            'avg_individual_recall': float(np.mean(individual_recalls)),
+            'n_clusters': n_clusters
+        }
     
     def parameter_sweep(
         self,
@@ -215,43 +300,52 @@ class KMeansHNSWEvaluator:
         ground_truths = {}
         for k in k_values:
             ground_truths[k] = self.compute_ground_truth(k)
-        
+
         for i, combination in enumerate(combinations):
             print(f"\n--- Combination {i + 1}/{len(combinations)} ---")
-            
+
             # Create parameter dictionary
             params = dict(zip(param_names, combination))
             print(f"Parameters: {params}")
-            
+
             try:
-                # Build K-Means HNSW system with these parameters
+                phase_records = []
+                # Phase 1: baseline HNSW recall (optional multiple ef values)
+                baseline_ef_values = evaluation_params.get('baseline_ef_values', [evaluation_params.get('baseline_ef', 100)])
+                for k in k_values:
+                    for ef in baseline_ef_values:
+                        b_eval = self.evaluate_hnsw_baseline(base_index, k, ef, ground_truths[k])
+                        phase_records.append({**b_eval, 'k': k})
+
+                # Build full system (includes clustering + child mapping)
                 construction_start = time.time()
-                kmeans_hnsw = KMeansHNSW(
-                    base_index=base_index,
-                    **params
-                )
+                kmeans_hnsw = KMeansHNSW(base_index=base_index, **params)
                 construction_time = time.time() - construction_start
-                
-                # Evaluate for each k and n_probe combination
+
+                # Phase 2: clusters-only recall using fitted internal KMeans model
+                for k in k_values:
+                    c_eval = self.evaluate_clusters_only(
+                        kmeans_hnsw.kmeans_model,
+                        kmeans_hnsw._extract_dataset_vectors(),  # reuse extractor
+                        k,
+                        ground_truths[k]
+                    )
+                    phase_records.append({**c_eval, 'k': k})
+
+                # Phase 3: full two-stage search evaluations over n_probe
+                for k in k_values:
+                    for n_probe in n_probe_values:
+                        eval_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truths[k])
+                        phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_two_stage'})
+
                 combination_results = {
                     'parameters': params,
                     'construction_time': construction_time,
-                    'evaluations': []
+                    'phase_evaluations': phase_records
                 }
-                
-                for k in k_values:
-                    for n_probe in n_probe_values:
-                        eval_result = self.evaluate_recall(
-                            kmeans_hnsw, k, n_probe, ground_truths[k]
-                        )
-                        combination_results['evaluations'].append(eval_result)
-                
                 results.append(combination_results)
-                
-                # Print summary for this combination
-                best_recall = max(eval['recall_at_k'] for eval in combination_results['evaluations'])
-                print(f"Best recall for this combination: {best_recall:.4f}")
-                
+                best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
+                print(f"Best recall (any phase) for this combination: {best_recall:.4f}")
             except Exception as e:
                 print(f"Error with combination {params}: {e}")
                 continue
@@ -282,7 +376,7 @@ class KMeansHNSWEvaluator:
         best_value = -float('inf') if 'recall' in optimization_target else float('inf')
         
         for result in sweep_results:
-            for evaluation in result['evaluations']:
+            for evaluation in result.get('phase_evaluations', []):
                 # Check constraints
                 if constraints:
                     violates_constraint = False
@@ -402,79 +496,78 @@ class KMeansHNSWEvaluator:
         }
     
     def _evaluate_pure_kmeans(self, k: int, ground_truth: Dict) -> Dict[str, Any]:
+        """Evaluate pure MiniBatchKMeans clustering for comparison.
+        Uses centroids to pick a single cluster, then returns top-k points within that cluster.
         """
-        Evaluate pure K-means clustering for comparison.
-        This uses cluster centroids as the search result.
-        """
-        print("Running K-means clustering...")
-        
-        # Use same number of clusters as K-means HNSW for fair comparison
-        n_clusters = 10  # Should match the parameter being tested
-        
+        print("Running MiniBatchKMeans clustering (baseline)...")
+
+        # Heuristic: choose number of clusters proportional to sqrt(N) if feasible, fallback to 10
+        n_samples = len(self.dataset)
+        suggested = int(np.sqrt(n_samples))
+        n_clusters = max(10, min(256, suggested))
+
         start_time = time.time()
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, verbose=False)
+        kmeans = MiniBatchKMeans(
+            n_clusters=n_clusters,
+            random_state=42,
+            batch_size=min(1024, n_samples),
+            n_init=3,
+            max_iter=100,
+            verbose=0
+        )
         kmeans.fit(self.dataset)
         clustering_time = time.time() - start_time
-        
-        print(f"K-means clustering completed in {clustering_time:.2f}s")
-        
-        # For each query, find the nearest cluster centroid and return k points from that cluster
+        print(f"MiniBatchKMeans clustering completed in {clustering_time:.2f}s (n_clusters={n_clusters})")
+
         query_times = []
         total_correct = 0
         total_expected = len(self.query_set) * k
         individual_recalls = []
-        
+
         for query_vector, query_id in zip(self.query_set, self.query_ids):
             search_start = time.time()
-            
-            # Find nearest cluster centroid
-            distances_to_centroids = [
-                np.linalg.norm(query_vector - centroid) 
-                for centroid in kmeans.cluster_centers_
-            ]
-            nearest_cluster = np.argmin(distances_to_centroids)
-            
-            # Get all points in the nearest cluster
+            # Vectorized distance to centroids
+            diffs = kmeans.cluster_centers_ - query_vector
+            distances_to_centroids = np.linalg.norm(diffs, axis=1)
+            nearest_cluster = int(np.argmin(distances_to_centroids))
+
             cluster_points = np.where(kmeans.labels_ == nearest_cluster)[0]
-            
-            # Calculate distances to all points in the cluster
             if len(cluster_points) > 0:
-                distances_in_cluster = [
-                    (np.linalg.norm(query_vector - self.dataset[point_id]), point_id)
-                    for point_id in cluster_points
-                    if point_id != query_id  # Exclude query itself
+                cluster_vecs = self.dataset[cluster_points]
+                point_diffs = cluster_vecs - query_vector
+                dists = np.linalg.norm(point_diffs, axis=1)
+                # Exclude the query id if present
+                filtered = [
+                    (dist, int(pid)) for dist, pid in zip(dists, cluster_points)
+                    if pid != query_id
                 ]
-                distances_in_cluster.sort()
-                
-                # Take top-k from this cluster
-                results = distances_in_cluster[:k]
-                found_neighbors = {point_id for _, point_id in results}
+                filtered.sort(key=lambda x: x[0])
+                results = filtered[:k]
+                found_neighbors = {pid for _, pid in results}
             else:
                 found_neighbors = set()
-            
+
             search_time = time.time() - search_start
             query_times.append(search_time)
-            
-            # Compare with ground truth
+
             true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
             correct = len(true_neighbors & found_neighbors)
             total_correct += correct
-            
             individual_recall = correct / k if k > 0 else 0.0
             individual_recalls.append(individual_recall)
-        
-        overall_recall = total_correct / total_expected
-        
+
+        overall_recall = total_correct / total_expected if total_expected > 0 else 0.0
+
         return {
-            'method': 'pure_kmeans',
+            'method': 'pure_minibatch_kmeans',
             'recall_at_k': overall_recall,
             'total_correct': total_correct,
             'total_expected': total_expected,
             'individual_recalls': individual_recalls,
-            'avg_individual_recall': np.mean(individual_recalls),
-            'std_individual_recall': np.std(individual_recalls),
-            'avg_query_time_ms': np.mean(query_times) * 1000,
-            'std_query_time_ms': np.std(query_times) * 1000,
+            'avg_individual_recall': float(np.mean(individual_recalls)),
+            'std_individual_recall': float(np.std(individual_recalls)),
+            'avg_query_time_ms': float(np.mean(query_times) * 1000),
+            'std_query_time_ms': float(np.std(query_times) * 1000),
             'clustering_time': clustering_time,
             'n_clusters': n_clusters,
             'k': k
@@ -549,21 +642,34 @@ def load_sift_data():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="K-Means HNSW Parameter Tuning and Evaluation")
+    parser.add_argument('--dataset-size', type=int, default=10000, help='Number of base vectors to use (default: 10000 ~1w)')
+    parser.add_argument('--query-size', type=int, default=50, help='Number of query vectors to use (default: 50)')
+    parser.add_argument('--dimension', type=int, default=128, help='Vector dimensionality for synthetic data (if SIFT not loaded)')
+    parser.add_argument('--no-sift', action='store_true', help='Force synthetic data even if SIFT files exist')
+    args = parser.parse_args()
+
     print("K-Means HNSW Parameter Tuning and Evaluation")
+    print(f"Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
     
-    # Try to load SIFT data, fall back to synthetic
-    base_vectors, query_vectors = load_sift_data()
+    # Try to load SIFT data, fall back to synthetic unless disabled
+    base_vectors, query_vectors = (None, None)
+    if not args.no_sift:
+        base_vectors, query_vectors = load_sift_data()
     
     if base_vectors is None:
         # Create synthetic data
         print("Creating synthetic dataset...")
-        base_vectors = np.random.randn(10000, 128).astype(np.float32)
-        query_vectors = np.random.randn(100, 128).astype(np.float32)
+        base_vectors = np.random.randn(max(args.dataset_size, 10000), args.dimension).astype(np.float32)
+        query_vectors = np.random.randn(max(args.query_size, 100), args.dimension).astype(np.float32)
     
-    # Use first 100 queries for efficiency
-    base_vectors = base_vectors[:5000]
-    print("len_base_vectors", len(base_vectors))
-    query_vectors = query_vectors[:10]
+    # Slice to requested sizes (cap by available)
+    if len(base_vectors) > args.dataset_size:
+        base_vectors = base_vectors[:args.dataset_size]
+    if len(query_vectors) > args.query_size:
+        query_vectors = query_vectors[:args.query_size]
+    print(f"Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
     query_ids = list(range(len(query_vectors)))
     
     # Distance function
@@ -584,10 +690,18 @@ if __name__ == "__main__":
     evaluator = KMeansHNSWEvaluator(base_vectors, query_vectors, query_ids, distance_func)
     
     # Define parameter grid for sweep
+    # Adjust default cluster count heuristics for larger datasets: scale choices
+    if args.dataset_size <= 2000:
+        cluster_options = [10]
+    elif args.dataset_size <= 5000:
+        cluster_options = [16, 32]
+    else:
+        cluster_options = [32, 64, 128]
+
     param_grid = {
-        'n_clusters': [10],
-        'k_children': [500],
-        'child_search_ef': [500]
+        'n_clusters': cluster_options,
+        'k_children': [200],
+        'child_search_ef': [300]
     }
     
     evaluation_params = {
@@ -597,11 +711,13 @@ if __name__ == "__main__":
     
     # Perform parameter sweep
     print("\nStarting parameter sweep...")
+    # Limit combinations to keep runtime sane on large sets
+    max_combos = 9 if len(cluster_options) > 1 else None
     sweep_results = evaluator.parameter_sweep(
         base_index,
         param_grid,
         evaluation_params,
-        max_combinations=9  # Limit for demo
+        max_combinations=max_combos
     )
     
     # Find optimal parameters

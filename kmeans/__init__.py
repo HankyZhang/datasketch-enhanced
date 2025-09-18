@@ -1,9 +1,10 @@
-"""
-K-means clustering implementation for vector data.
+"""Deprecated legacy 'kmeans' package.
+
+All functionality has migrated to scikit-learn's MiniBatchKMeans.
+Import this package is now unsupported.
 """
 
-from .kmeans import KMeans
-from .utils import load_sift_data, evaluate_clustering, benchmark_kmeans, find_optimal_k, create_sample_dataset
-
-__version__ = "1.0.0"
-__all__ = ["KMeans", "load_sift_data", "evaluate_clustering", "benchmark_kmeans", "find_optimal_k", "create_sample_dataset"]
+raise ImportError(
+	"The 'kmeans' package has been removed. Use 'sklearn.cluster.MiniBatchKMeans'. "
+	"Refer to MIGRATION_KMEANS.md for guidance."
+)

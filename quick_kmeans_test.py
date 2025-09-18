@@ -22,23 +22,30 @@ def quick_test():
     print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features")
     
     try:
-        from kmeans.kmeans import KMeans
-        
-        print("Testing optimized K-means...")
+        from sklearn.cluster import MiniBatchKMeans
+
+        print("Testing MiniBatchKMeans...")
         start = time.time()
-        
-        kmeans = KMeans(n_clusters=10, max_iters=50, verbose=True, random_state=42)
+
+        kmeans = MiniBatchKMeans(
+            n_clusters=10,
+            max_iter=50,
+            batch_size=512,
+            n_init=3,
+            random_state=42,
+            verbose=0
+        )
         kmeans.fit(X)
-        
+
         elapsed = time.time() - start
-        
+
         print(f"✅ Completed in {elapsed:.2f} seconds")
         print(f"   Inertia: {kmeans.inertia_:.2f}")
-        print(f"   Iterations: {kmeans.n_iter_}")
+        print(f"   Iterations: {getattr(kmeans, 'n_iter_', 'N/A')}")
         print(f"   Speed: {X.shape[0]/elapsed:.0f} samples/second")
-        
+
         return True
-        
+
     except Exception as e:
         print(f"❌ Error: {e}")
         return False
@@ -46,6 +53,6 @@ def quick_test():
 if __name__ == "__main__":
     success = quick_test()
     if success:
-        print("\n🎉 K-means optimizations working!")
+        print("\n🎉 MiniBatchKMeans working!")
     else:
         print("\n❌ Test failed")

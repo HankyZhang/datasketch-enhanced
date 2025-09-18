@@ -22,10 +22,13 @@ import numpy as np
 from typing import Dict, List, Tuple, Set, Optional, Hashable
 from collections import defaultdict
 
+# New dependency: sklearn MiniBatchKMeans
+from sklearn.cluster import MiniBatchKMeans
+
 # Add parent directory to path to import modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from hnsw.hnsw import HNSW
-from kmeans.kmeans import KMeans
+# Removed import of local KMeans implementation in favor of sklearn's MiniBatchKMeans
 
 
 class KMeansHNSW:
@@ -79,14 +82,16 @@ class KMeansHNSW:
         else:
             self.child_search_ef = child_search_ef
         
-        # K-Means parameters - optimized for speed
+        # K-Means parameters (adapted for MiniBatchKMeans)
+        # We keep original semantic keys but translate to MiniBatchKMeans accepted params.
         default_kmeans_params = {
-            'max_iters': 100,  # Reduced from 300 for speed
-            'tol': 1e-3,       # Relaxed tolerance for faster convergence
-            'n_init': 3,       # Reduced from 10 for speed
+            'max_iters': 100,      # Will be mapped to max_iter
+            'tol': 1e-3,
+            'n_init': 3,
             'init': 'k-means++',
             'random_state': 42,
-            'verbose': False   # Set to False for speed
+            'verbose': 0,          # MiniBatchKMeans expects int verbosity level
+            'batch_size': None,     # Auto-determined if None
         }
         if kmeans_params:
             default_kmeans_params.update(kmeans_params)
@@ -100,15 +105,16 @@ class KMeansHNSW:
         
         # Phase 2 components
         self.kmeans_model = None
+        self._cluster_info = {}
         self.centroids = None  # Shape: (n_clusters, dim)
         self.centroid_ids = []  # Virtual IDs for centroids
         self.parent_child_map = {}  # centroid_id -> List[child_id]
         self.child_vectors = {}  # child_id -> vector
-        
+
         # Vectorized matrices for fast search
         self._centroid_matrix = None
         self._centroid_id_array = None
-        
+
         # Statistics
         self.stats = {
             'n_clusters': n_clusters,
@@ -126,7 +132,7 @@ class KMeansHNSW:
         self.search_times = []
         self.candidate_sizes = []
         self._overlap_stats = {}
-        
+
         # Build the system
         self._build_kmeans_hnsw_system()
     
@@ -182,29 +188,56 @@ class KMeansHNSW:
         return np.vstack(vectors)
     
     def _perform_kmeans_clustering(self, dataset_vectors: np.ndarray):
-        """Perform K-Means clustering to identify parent centroids."""
-        print(f"Running K-Means clustering with {self.n_clusters} clusters...")
-        
-        # Initialize K-Means model
-        self.kmeans_model = KMeans(
-            n_clusters=self.n_clusters,
-            **self.kmeans_params
-        )
-        
-        # Fit the model
+        """Perform MiniBatchKMeans clustering to identify parent centroids."""
+        print(f"Running MiniBatchKMeans with {self.n_clusters} clusters...")
+
+        params = self.kmeans_params.copy()
+        # Translate legacy keys
+        if 'max_iters' in params and 'max_iter' not in params:
+            params['max_iter'] = params.pop('max_iters')
+        # Determine batch size if not provided
+        if params.get('batch_size') in (None, 0):
+            # Heuristic: up to 1024 or dataset size, whichever smaller
+            params['batch_size'] = min(1024, len(dataset_vectors))
+
+        # Filter only valid MiniBatchKMeans params
+        valid_keys = {
+            'n_clusters', 'init', 'max_iter', 'batch_size', 'verbose', 'compute_labels',
+            'random_state', 'tol', 'max_no_improvement', 'init_size', 'n_init',
+            'reassignment_ratio'
+        }
+        mbk_params = {k: v for k, v in params.items() if k in valid_keys}
+        mbk_params['n_clusters'] = self.n_clusters  # ensure override
+
+        self.kmeans_model = MiniBatchKMeans(**mbk_params)
+
+        # Fit model
         self.kmeans_model.fit(dataset_vectors)
-        
+
         # Extract centroids and create virtual IDs
         self.centroids = self.kmeans_model.cluster_centers_
         self.centroid_ids = [f"centroid_{i}" for i in range(self.n_clusters)]
-        
-        print(f"K-Means completed with inertia: {self.kmeans_model.inertia_:.2f}")
-        
-        # Print cluster info
-        cluster_info = self.kmeans_model.get_cluster_info()
-        print(f"Cluster sizes - Avg: {cluster_info['avg_cluster_size']:.1f}, "
-              f"Min: {cluster_info['min_cluster_size']}, "
-              f"Max: {cluster_info['max_cluster_size']}")
+
+        # Compute cluster statistics
+        labels = getattr(self.kmeans_model, 'labels_', None)
+        if labels is not None:
+            cluster_sizes = np.bincount(labels, minlength=self.n_clusters)
+            self._cluster_info = {
+                'avg_cluster_size': float(np.mean(cluster_sizes)),
+                'std_cluster_size': float(np.std(cluster_sizes)),
+                'min_cluster_size': int(np.min(cluster_sizes)),
+                'max_cluster_size': int(np.max(cluster_sizes)),
+                'inertia': float(self.kmeans_model.inertia_),
+                'n_iterations': int(getattr(self.kmeans_model, 'n_iter_', 0)),
+            }
+            print(
+                f"MiniBatchKMeans inertia: {self._cluster_info['inertia']:.2f}; "
+                f"Cluster sizes - Avg: {self._cluster_info['avg_cluster_size']:.1f}, "
+                f"Min: {self._cluster_info['min_cluster_size']}, "
+                f"Max: {self._cluster_info['max_cluster_size']}"
+            )
+        else:
+            print(f"MiniBatchKMeans inertia: {self.kmeans_model.inertia_:.2f}")
     
     def _assign_children_via_hnsw(self):
         """Assign children to each centroid using HNSW search."""
@@ -460,16 +493,15 @@ class KMeansHNSW:
         stats.update(self._overlap_stats)
         
         # Add K-Means specific stats
-        if self.kmeans_model:
-            cluster_info = self.kmeans_model.get_cluster_info()
+        if self._cluster_info:
             stats.update({
-                'kmeans_inertia': cluster_info['inertia'],
-                'kmeans_iterations': cluster_info['n_iterations'],
+                'kmeans_inertia': self._cluster_info.get('inertia'),
+                'kmeans_iterations': self._cluster_info.get('n_iterations'),
                 'cluster_size_stats': {
-                    'avg': cluster_info['avg_cluster_size'],
-                    'std': cluster_info['std_cluster_size'],
-                    'min': cluster_info['min_cluster_size'],
-                    'max': cluster_info['max_cluster_size']
+                    'avg': self._cluster_info.get('avg_cluster_size'),
+                    'std': self._cluster_info.get('std_cluster_size'),
+                    'min': self._cluster_info.get('min_cluster_size'),
+                    'max': self._cluster_info.get('max_cluster_size')
                 }
             })
         
