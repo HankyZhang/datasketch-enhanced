@@ -71,7 +71,7 @@ class KMeans:
             raise ValueError(f"Unknown initialization method: {self.init}")
     
     def _kmeans_plus_plus_init(self, X: np.ndarray) -> np.ndarray:
-        """K-means++ initialization for better initial centroids."""
+        """K-means++ initialization with vectorized operations for better performance."""
         n_samples, n_features = X.shape
         centroids = np.zeros((self.n_clusters, n_features))
         
@@ -79,44 +79,53 @@ class KMeans:
         centroids[0] = X[np.random.randint(n_samples)]
         
         for c_id in range(1, self.n_clusters):
-            # Calculate distances to nearest centroid for each point
-            distances = np.array([
-                min([np.linalg.norm(x - c)**2 for c in centroids[:c_id]])
-                for x in X
-            ])
+            # Vectorized distance computation to all existing centroids
+            existing_centroids = centroids[:c_id]  # Shape: (c_id, n_features)
+            
+            # Compute distances from all points to all existing centroids
+            # X shape: (n_samples, n_features), existing_centroids: (c_id, n_features)
+            distances_to_centroids = np.linalg.norm(
+                X[:, np.newaxis] - existing_centroids[np.newaxis, :], axis=2
+            )  # Shape: (n_samples, c_id)
+            
+            # Get minimum distance to any centroid for each point
+            min_distances_squared = np.min(distances_to_centroids, axis=1) ** 2
             
             # Choose next centroid with probability proportional to squared distance
-            probabilities = distances / distances.sum()
-            cumulative_probs = probabilities.cumsum()
+            probabilities = min_distances_squared / min_distances_squared.sum()
+            cumulative_probs = np.cumsum(probabilities)
             r = np.random.rand()
             
-            for j, p in enumerate(cumulative_probs):
-                if r < p:
-                    centroids[c_id] = X[j]
-                    break
+            # Find the first index where cumulative probability >= r
+            next_centroid_idx = np.searchsorted(cumulative_probs, r)
+            centroids[c_id] = X[next_centroid_idx]
                     
         return centroids
     
     def _assign_clusters(self, X: np.ndarray, centroids: np.ndarray) -> np.ndarray:
-        """Assign each point to the nearest centroid."""
-        n_samples = X.shape[0]
-        labels = np.zeros(n_samples, dtype=int)
+        """Assign each point to the nearest centroid using vectorized operations."""
+        # Vectorized distance computation: much faster than loops
+        # X shape: (n_samples, n_features)
+        # centroids shape: (n_clusters, n_features)
         
-        for i in range(n_samples):
-            distances = [np.linalg.norm(X[i] - centroid) for centroid in centroids]
-            labels[i] = np.argmin(distances)
-            
+        # Compute distances using broadcasting: (n_samples, n_clusters)
+        distances = np.linalg.norm(X[:, np.newaxis] - centroids[np.newaxis, :], axis=2)
+        
+        # Find closest centroid for each point
+        labels = np.argmin(distances, axis=1)
+        
         return labels
     
     def _update_centroids(self, X: np.ndarray, labels: np.ndarray) -> np.ndarray:
-        """Update centroids as the mean of assigned points."""
+        """Update centroids using vectorized operations."""
         n_features = X.shape[1]
         centroids = np.zeros((self.n_clusters, n_features))
         
+        # Vectorized centroid update
         for k in range(self.n_clusters):
-            cluster_points = X[labels == k]
-            if len(cluster_points) > 0:
-                centroids[k] = cluster_points.mean(axis=0)
+            mask = labels == k
+            if np.any(mask):
+                centroids[k] = X[mask].mean(axis=0)
             else:
                 # If cluster is empty, reinitialize randomly
                 centroids[k] = X[np.random.randint(len(X))]
@@ -124,13 +133,11 @@ class KMeans:
         return centroids
     
     def _calculate_inertia(self, X: np.ndarray, labels: np.ndarray, centroids: np.ndarray) -> float:
-        """Calculate within-cluster sum of squares (inertia)."""
-        inertia = 0.0
-        for k in range(self.n_clusters):
-            cluster_points = X[labels == k]
-            if len(cluster_points) > 0:
-                inertia += np.sum((cluster_points - centroids[k]) ** 2)
-        return inertia
+        """Calculate within-cluster sum of squares using vectorized operations."""
+        # Vectorized inertia calculation
+        assigned_centroids = centroids[labels]  # Shape: (n_samples, n_features)
+        squared_distances = np.sum((X - assigned_centroids) ** 2, axis=1)
+        return np.sum(squared_distances)
     
     def _fit_single(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, int]:
         """Single k-means run."""

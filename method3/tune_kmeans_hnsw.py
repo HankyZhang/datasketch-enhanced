@@ -17,6 +17,7 @@ from itertools import product
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from method3.kmeans_hnsw import KMeansHNSW
 from hnsw.hnsw import HNSW
+from kmeans.kmeans import KMeans
 
 
 class KMeansHNSWEvaluator:
@@ -330,7 +331,7 @@ class KMeansHNSWEvaluator:
         ef_values: List[int] = None
     ) -> Dict[str, Any]:
         """
-        Compare K-Means HNSW performance with baseline HNSW.
+        Compare K-Means HNSW performance with baseline HNSW and pure K-means.
         
         Args:
             kmeans_hnsw: K-Means HNSW system
@@ -340,17 +341,21 @@ class KMeansHNSWEvaluator:
             ef_values: List of ef values to test for baseline HNSW
             
         Returns:
-            Comparison results
+            Comparison results including pure K-means clustering
         """
         if ef_values is None:
             ef_values = [50, 100, 200, 400]
         
-        print(f"Comparing K-Means HNSW with baseline HNSW...")
+        print(f"Comparing K-Means HNSW with baseline HNSW and pure K-means...")
         
         ground_truth = self.compute_ground_truth(k)
         
         # Evaluate K-Means HNSW
         kmeans_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truth)
+        
+        # Evaluate pure K-means clustering
+        print("Evaluating pure K-means clustering...")
+        kmeans_clustering_result = self._evaluate_pure_kmeans(k, ground_truth)
         
         # Evaluate baseline HNSW with different ef values
         baseline_results = []
@@ -384,13 +389,95 @@ class KMeansHNSWEvaluator:
         
         return {
             'kmeans_hnsw': kmeans_result,
+            'pure_kmeans': kmeans_clustering_result,
             'baseline_hnsw': baseline_results,
             'comparison_summary': {
-                'kmeans_recall': kmeans_result['recall_at_k'],
-                'kmeans_time_ms': kmeans_result['avg_query_time_ms'],
+                'kmeans_hnsw_recall': kmeans_result['recall_at_k'],
+                'kmeans_hnsw_time_ms': kmeans_result['avg_query_time_ms'],
+                'pure_kmeans_recall': kmeans_clustering_result['recall_at_k'],
+                'pure_kmeans_time_ms': kmeans_clustering_result['avg_query_time_ms'],
                 'best_baseline_recall': max(r['recall_at_k'] for r in baseline_results),
                 'best_baseline_time_ms': min(r['avg_query_time_ms'] for r in baseline_results)
             }
+        }
+    
+    def _evaluate_pure_kmeans(self, k: int, ground_truth: Dict) -> Dict[str, Any]:
+        """
+        Evaluate pure K-means clustering for comparison.
+        This uses cluster centroids as the search result.
+        """
+        print("Running K-means clustering...")
+        
+        # Use same number of clusters as K-means HNSW for fair comparison
+        n_clusters = 10  # Should match the parameter being tested
+        
+        start_time = time.time()
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, verbose=False)
+        kmeans.fit(self.dataset)
+        clustering_time = time.time() - start_time
+        
+        print(f"K-means clustering completed in {clustering_time:.2f}s")
+        
+        # For each query, find the nearest cluster centroid and return k points from that cluster
+        query_times = []
+        total_correct = 0
+        total_expected = len(self.query_set) * k
+        individual_recalls = []
+        
+        for query_vector, query_id in zip(self.query_set, self.query_ids):
+            search_start = time.time()
+            
+            # Find nearest cluster centroid
+            distances_to_centroids = [
+                np.linalg.norm(query_vector - centroid) 
+                for centroid in kmeans.cluster_centers_
+            ]
+            nearest_cluster = np.argmin(distances_to_centroids)
+            
+            # Get all points in the nearest cluster
+            cluster_points = np.where(kmeans.labels_ == nearest_cluster)[0]
+            
+            # Calculate distances to all points in the cluster
+            if len(cluster_points) > 0:
+                distances_in_cluster = [
+                    (np.linalg.norm(query_vector - self.dataset[point_id]), point_id)
+                    for point_id in cluster_points
+                    if point_id != query_id  # Exclude query itself
+                ]
+                distances_in_cluster.sort()
+                
+                # Take top-k from this cluster
+                results = distances_in_cluster[:k]
+                found_neighbors = {point_id for _, point_id in results}
+            else:
+                found_neighbors = set()
+            
+            search_time = time.time() - search_start
+            query_times.append(search_time)
+            
+            # Compare with ground truth
+            true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
+            correct = len(true_neighbors & found_neighbors)
+            total_correct += correct
+            
+            individual_recall = correct / k if k > 0 else 0.0
+            individual_recalls.append(individual_recall)
+        
+        overall_recall = total_correct / total_expected
+        
+        return {
+            'method': 'pure_kmeans',
+            'recall_at_k': overall_recall,
+            'total_correct': total_correct,
+            'total_expected': total_expected,
+            'individual_recalls': individual_recalls,
+            'avg_individual_recall': np.mean(individual_recalls),
+            'std_individual_recall': np.std(individual_recalls),
+            'avg_query_time_ms': np.mean(query_times) * 1000,
+            'std_query_time_ms': np.std(query_times) * 1000,
+            'clustering_time': clustering_time,
+            'n_clusters': n_clusters,
+            'k': k
         }
 
 
@@ -540,10 +627,21 @@ if __name__ == "__main__":
         )
         
         print("\nComparison Results:")
-        print(f"K-Means HNSW: Recall={comparison['comparison_summary']['kmeans_recall']:.4f}, "
-              f"Time={comparison['comparison_summary']['kmeans_time_ms']:.2f}ms")
+        print(f"K-Means HNSW: Recall={comparison['comparison_summary']['kmeans_hnsw_recall']:.4f}, "
+              f"Time={comparison['comparison_summary']['kmeans_hnsw_time_ms']:.2f}ms")
+        print(f"Pure K-Means: Recall={comparison['comparison_summary']['pure_kmeans_recall']:.4f}, "
+              f"Time={comparison['comparison_summary']['pure_kmeans_time_ms']:.2f}ms")
         print(f"Best Baseline: Recall={comparison['comparison_summary']['best_baseline_recall']:.4f}, "
               f"Time={comparison['comparison_summary']['best_baseline_time_ms']:.2f}ms")
+        
+        # Additional detailed output for pure K-means
+        pure_kmeans_result = comparison['pure_kmeans']
+        print(f"\nDetailed Pure K-Means Results:")
+        print(f"  Overall Recall@{pure_kmeans_result['k']}: {pure_kmeans_result['recall_at_k']:.4f}")
+        print(f"  Average Individual Recall: {pure_kmeans_result['avg_individual_recall']:.4f}")
+        print(f"  Correct/Expected: {pure_kmeans_result['total_correct']}/{pure_kmeans_result['total_expected']}")
+        print(f"  Clustering Time: {pure_kmeans_result['clustering_time']:.2f}s")
+        print(f"  Average Query Time: {pure_kmeans_result['avg_query_time_ms']:.2f}ms")
         
         # Save results
         results = {

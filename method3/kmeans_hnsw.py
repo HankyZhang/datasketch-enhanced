@@ -79,14 +79,14 @@ class KMeansHNSW:
         else:
             self.child_search_ef = child_search_ef
         
-        # K-Means parameters
+        # K-Means parameters - optimized for speed
         default_kmeans_params = {
-            'max_iters': 300,
-            'tol': 1e-4,
-            'n_init': 10,
+            'max_iters': 100,  # Reduced from 300 for speed
+            'tol': 1e-3,       # Relaxed tolerance for faster convergence
+            'n_init': 3,       # Reduced from 10 for speed
             'init': 'k-means++',
             'random_state': 42,
-            'verbose': True
+            'verbose': False   # Set to False for speed
         }
         if kmeans_params:
             default_kmeans_params.update(kmeans_params)
