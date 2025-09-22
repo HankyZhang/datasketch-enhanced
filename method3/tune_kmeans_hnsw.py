@@ -316,11 +316,29 @@ class KMeansHNSWEvaluator:
                     for ef in baseline_ef_values:
                         b_eval = self.evaluate_hnsw_baseline(base_index, k, ef, ground_truths[k])
                         phase_records.append({**b_eval, 'k': k})
+                        print(f"  [Baseline HNSW] k={k} ef={ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
+
+                # Pure KMeans baseline using same n_clusters; evaluate over same n_probe set for fairness
+                if 'n_clusters' in params:
+                    for k in k_values:
+                        for n_probe in n_probe_values:
+                            pure_eval = self._evaluate_pure_kmeans(
+                                k,
+                                ground_truths[k],
+                                n_clusters=params['n_clusters'],
+                                n_probe=n_probe
+                            )
+                            phase_records.append({**pure_eval, 'phase': 'pure_kmeans_for_combo'})
+                            print(
+                                f"  [Pure KMeans] k={k} n_clusters={params['n_clusters']} n_probe={n_probe} "
+                                f"recall={pure_eval['recall_at_k']:.4f} avg_time={pure_eval['avg_query_time_ms']:.2f}ms"
+                            )
 
                 # Build full system (includes clustering + child mapping)
                 construction_start = time.time()
                 kmeans_hnsw = KMeansHNSW(base_index=base_index, **params)
                 construction_time = time.time() - construction_start
+                print(f"  Built KMeansHNSW system in {construction_time:.2f}s")
 
                 # Phase 2: clusters-only recall using fitted internal KMeans model
                 for k in k_values:
@@ -331,12 +349,14 @@ class KMeansHNSWEvaluator:
                         ground_truths[k]
                     )
                     phase_records.append({**c_eval, 'k': k})
+                    print(f"  [Clusters Only] k={k} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
 
                 # Phase 3: full two-stage search evaluations over n_probe
                 for k in k_values:
                     for n_probe in n_probe_values:
                         eval_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truths[k])
                         phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_two_stage'})
+                        print(f"  [Two-Stage] k={k} n_probe={n_probe} recall={eval_result['recall_at_k']:.4f} avg_time={eval_result['avg_query_time_ms']:.2f}ms")
 
                 combination_results = {
                     'parameters': params,
@@ -424,63 +444,49 @@ class KMeansHNSWEvaluator:
         n_probe: int = 10,
         ef_values: List[int] = None
     ) -> Dict[str, Any]:
-        """
-        Compare K-Means HNSW performance with baseline HNSW and pure K-means.
-        
-        Args:
-            kmeans_hnsw: K-Means HNSW system
-            base_index: Baseline HNSW index
-            k: Number of results
-            n_probe: Number of centroids to probe for K-Means HNSW
-            ef_values: List of ef values to test for baseline HNSW
-            
-        Returns:
-            Comparison results including pure K-means clustering
+        """Compare K-Means HNSW performance with baseline HNSW and pure K-means.
+
+        Pure K-means is evaluated probing the same number of centroids (n_probe)
+        to make the comparison fair.
         """
         if ef_values is None:
             ef_values = [50, 100, 200, 400]
-        
-        print(f"Comparing K-Means HNSW with baseline HNSW and pure K-means...")
-        
+
+        print("Comparing K-Means HNSW with baseline HNSW and pure K-means...")
+
         ground_truth = self.compute_ground_truth(k)
-        
-        # Evaluate K-Means HNSW
+
+        # K-Means HNSW two-stage
         kmeans_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truth)
-        
-        # Evaluate pure K-means clustering
-        print("Evaluating pure K-means clustering...")
-        kmeans_clustering_result = self._evaluate_pure_kmeans(k, ground_truth)
-        
-        # Evaluate baseline HNSW with different ef values
+
+        # Pure k-means (multi-cluster probe)
+        print("Evaluating pure K-means clustering (matching n_probe)...")
+        kmeans_clustering_result = self._evaluate_pure_kmeans(k, ground_truth, n_probe=n_probe)
+
+        # Baseline HNSW
         baseline_results = []
         for ef in ef_values:
             print(f"Evaluating baseline HNSW with ef={ef}...")
-            
-            query_times = []
+            query_times: List[float] = []
             total_correct = 0
             total_expected = len(self.query_set) * k
-            
             for query_vector, query_id in zip(self.query_set, self.query_ids):
                 true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
-                
-                search_start = time.time()
+                t0 = time.time()
                 results = base_index.query(query_vector, k=k, ef=ef)
-                search_time = time.time() - search_start
-                query_times.append(search_time)
-                
-                found_neighbors = {node_id for node_id, _ in results}
+                dt = time.time() - t0
+                query_times.append(dt)
+                found_neighbors = {nid for nid, _ in results}
                 total_correct += len(true_neighbors & found_neighbors)
-            
-            baseline_result = {
+            baseline_results.append({
                 'method': 'baseline_hnsw',
                 'ef': ef,
-                'recall_at_k': total_correct / total_expected,
-                'avg_query_time_ms': np.mean(query_times) * 1000,
+                'recall_at_k': total_correct / total_expected if total_expected else 0.0,
+                'avg_query_time_ms': float(np.mean(query_times) * 1000),
                 'total_correct': total_correct,
                 'total_expected': total_expected
-            }
-            baseline_results.append(baseline_result)
-        
+            })
+
         return {
             'kmeans_hnsw': kmeans_result,
             'pure_kmeans': kmeans_clustering_result,
@@ -490,21 +496,30 @@ class KMeansHNSWEvaluator:
                 'kmeans_hnsw_time_ms': kmeans_result['avg_query_time_ms'],
                 'pure_kmeans_recall': kmeans_clustering_result['recall_at_k'],
                 'pure_kmeans_time_ms': kmeans_clustering_result['avg_query_time_ms'],
-                'best_baseline_recall': max(r['recall_at_k'] for r in baseline_results),
-                'best_baseline_time_ms': min(r['avg_query_time_ms'] for r in baseline_results)
+                'best_baseline_recall': max(r['recall_at_k'] for r in baseline_results) if baseline_results else 0.0,
+                'best_baseline_time_ms': min(r['avg_query_time_ms'] for r in baseline_results) if baseline_results else 0.0
             }
         }
     
-    def _evaluate_pure_kmeans(self, k: int, ground_truth: Dict) -> Dict[str, Any]:
+    def _evaluate_pure_kmeans(self, k: int, ground_truth: Dict, n_clusters: Optional[int] = None, n_probe: int = 1) -> Dict[str, Any]:
         """Evaluate pure MiniBatchKMeans clustering for comparison.
-        Uses centroids to pick a single cluster, then returns top-k points within that cluster.
-        """
-        print("Running MiniBatchKMeans clustering (baseline)...")
+        Uses centroids to pick the nearest n_probe clusters, then returns top-k points within their union.
 
-        # Heuristic: choose number of clusters proportional to sqrt(N) if feasible, fallback to 10
+        Args:
+            k: recall@k evaluation size
+            ground_truth: dict mapping query id -> list of (dist, id)
+            n_clusters: if provided, force this number of clusters (aligning with current param combination)
+            n_probe: number of closest centroids to probe (>=1)
+        """
+        # Heuristic: choose number of clusters proportional to sqrt(N) if not specified, fallback to 10
         n_samples = len(self.dataset)
-        suggested = int(np.sqrt(n_samples))
-        n_clusters = max(10, min(256, suggested))
+        if n_clusters is None:
+            suggested = int(np.sqrt(n_samples))
+            n_clusters = max(10, min(256, suggested))
+        if n_probe < 1:
+            n_probe = 1
+
+        print(f"Running MiniBatchKMeans clustering (n_clusters={n_clusters}, n_probe={n_probe}) for pure KMeans baseline...")
 
         start_time = time.time()
         kmeans = MiniBatchKMeans(
@@ -517,33 +532,44 @@ class KMeansHNSWEvaluator:
         )
         kmeans.fit(self.dataset)
         clustering_time = time.time() - start_time
-        print(f"MiniBatchKMeans clustering completed in {clustering_time:.2f}s (n_clusters={n_clusters})")
 
         query_times = []
         total_correct = 0
         total_expected = len(self.query_set) * k
         individual_recalls = []
 
+        # Cap n_probe to number of clusters
+        n_probe_eff = min(n_probe, n_clusters)
+
         for query_vector, query_id in zip(self.query_set, self.query_ids):
             search_start = time.time()
             # Vectorized distance to centroids
             diffs = kmeans.cluster_centers_ - query_vector
             distances_to_centroids = np.linalg.norm(diffs, axis=1)
-            nearest_cluster = int(np.argmin(distances_to_centroids))
+            # Get indices of n_probe closest centroids (unordered then sort for determinism)
+            probe_centroids = np.argpartition(distances_to_centroids, n_probe_eff - 1)[:n_probe_eff]
+            # Optionally sort by distance (small overhead, clearer behavior)
+            probe_centroids = probe_centroids[np.argsort(distances_to_centroids[probe_centroids])]
 
-            cluster_points = np.where(kmeans.labels_ == nearest_cluster)[0]
-            if len(cluster_points) > 0:
-                cluster_vecs = self.dataset[cluster_points]
-                point_diffs = cluster_vecs - query_vector
-                dists = np.linalg.norm(point_diffs, axis=1)
-                # Exclude the query id if present
-                filtered = [
-                    (dist, int(pid)) for dist, pid in zip(dists, cluster_points)
-                    if pid != query_id
-                ]
-                filtered.sort(key=lambda x: x[0])
-                results = filtered[:k]
-                found_neighbors = {pid for _, pid in results}
+            # Collect member ids from all probed centroids
+            member_ids_list = [np.where(kmeans.labels_ == cid)[0] for cid in probe_centroids]
+            if member_ids_list:
+                union_points = np.concatenate(member_ids_list)
+                if union_points.size > 0:
+                    union_vecs = self.dataset[union_points]
+                    point_diffs = union_vecs - query_vector
+                    dists = np.linalg.norm(point_diffs, axis=1)
+                    # Exclude the query id if present
+                    filtered = [
+                        (dist, int(pid)) for dist, pid in zip(dists, union_points)
+                        if pid != query_id
+                    ]
+                    # Partial sort then full sort if small; we just sort because union typically modest
+                    filtered.sort(key=lambda x: x[0])
+                    results = filtered[:k]
+                    found_neighbors = {pid for _, pid in results}
+                else:
+                    found_neighbors = set()
             else:
                 found_neighbors = set()
 
@@ -553,8 +579,7 @@ class KMeansHNSWEvaluator:
             true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
             correct = len(true_neighbors & found_neighbors)
             total_correct += correct
-            individual_recall = correct / k if k > 0 else 0.0
-            individual_recalls.append(individual_recall)
+            individual_recalls.append(correct / k if k > 0 else 0.0)
 
         overall_recall = total_correct / total_expected if total_expected > 0 else 0.0
 
@@ -570,6 +595,7 @@ class KMeansHNSWEvaluator:
             'std_query_time_ms': float(np.std(query_times) * 1000),
             'clustering_time': clustering_time,
             'n_clusters': n_clusters,
+            'n_probe': n_probe_eff,
             'k': k
         }
 

@@ -50,7 +50,12 @@ class KMeansHNSW:
         include_centroids_in_results: bool = False,
         diversify_max_assignments: Optional[int] = None,
         repair_min_assignments: Optional[int] = None,
-        overlap_sample: int = 50
+    overlap_sample: int = 50,
+    # --- Adaptive k_children controls ---
+    adaptive_k_children: bool = False,
+    k_children_scale: float = 1.5,
+    k_children_min: int = 100,
+    k_children_max: Optional[int] = None
     ):
         """
         Initialize the K-Means HNSW system.
@@ -66,11 +71,19 @@ class KMeansHNSW:
             diversify_max_assignments: Maximum assignments per child for diversification
             repair_min_assignments: Minimum assignments per child for repair
             overlap_sample: Sample size for overlap statistics
+            adaptive_k_children: If True, override provided k_children using dataset stats
+            k_children_scale: Multiplier applied to average cluster size when adaptive_k_children
+            k_children_min: Minimum k_children when adaptive
+            k_children_max: Optional upper bound for k_children when adaptive
         """
         self.base_index = base_index
         self.n_clusters = n_clusters
         self.k_children = k_children
         self.distance_func = distance_func or base_index._distance_func
+        self.adaptive_k_children = adaptive_k_children
+        self.k_children_scale = k_children_scale
+        self.k_children_min = k_children_min
+        self.k_children_max = k_children_max
         
         # Auto-compute child_search_ef if not provided
         if child_search_ef is None:
@@ -120,6 +133,7 @@ class KMeansHNSW:
             'n_clusters': n_clusters,
             'k_children': k_children,
             'child_search_ef': self.child_search_ef,
+            'adaptive_k_children': adaptive_k_children,
             'kmeans_fit_time': 0.0,
             'child_mapping_time': 0.0,
             'total_construction_time': 0.0,
@@ -150,6 +164,19 @@ class KMeansHNSW:
         self._perform_kmeans_clustering(dataset_vectors)
         self.stats['kmeans_fit_time'] = time.time() - t0
         print(f"K-Means clustering completed in {self.stats['kmeans_fit_time']:.2f}s")
+
+        # Adaptive k_children recalculation (after clustering so we know avg cluster size)
+        if self.adaptive_k_children:
+            avg_cluster_size = len(dataset_vectors) / max(1, self.n_clusters)
+            adaptive_value = int(avg_cluster_size * self.k_children_scale)
+            adaptive_value = max(self.k_children_min, adaptive_value)
+            if self.k_children_max is not None:
+                adaptive_value = min(self.k_children_max, adaptive_value)
+            if adaptive_value != self.k_children:
+                print(f"Adaptive k_children adjustment: {self.k_children} -> {adaptive_value} "
+                      f"(avg_cluster_size={avg_cluster_size:.1f}, scale={self.k_children_scale})")
+                self.k_children = adaptive_value
+                self.stats['k_children'] = self.k_children
         
         # Step 3: Find children for each centroid using HNSW
         t1 = time.time()
@@ -564,6 +591,40 @@ class KMeansHNSW:
                 'max_jaccard_overlap': 0.0,
                 'overlap_samples': 0
             }
+
+    # -------------------- Public Maintenance / Repair API --------------------
+    def run_repair(self, min_assignments: int, verbose: bool = True) -> Dict[str, float]:
+        """Force a repair phase after construction or parameter updates.
+
+        This can be used even if diversification was not originally enabled.
+        It ensures every base index node is assigned to at least `min_assignments` centroids.
+
+        Args:
+            min_assignments: Minimum centroid assignments per data node
+            verbose: Print progress
+
+        Returns:
+            Dictionary with coverage statistics after repair.
+        """
+        if not self.parent_child_map:
+            raise RuntimeError("Parent-child map is empty; build the system first.")
+
+        from collections import defaultdict as _dd
+        assignment_counts = _dd(int)
+        for centroid_id, children in self.parent_child_map.items():
+            for child in children:
+                assignment_counts[child] += 1
+
+        # Set property so internal method uses this threshold
+        self.repair_min_assignments = min_assignments
+        if verbose:
+            print(f"Running manual repair to guarantee >= {min_assignments} assignments per node...")
+        self._repair_child_assignments(assignment_counts)
+        self._compute_mapping_diagnostics()
+        return {
+            'coverage_fraction': self.stats.get('coverage_fraction', 0.0),
+            'avg_children_per_centroid': self.stats.get('avg_children_per_centroid', 0.0)
+        }
 
 
 def create_synthetic_dataset(n_vectors: int, dim: int, seed: int = 42) -> np.ndarray:
