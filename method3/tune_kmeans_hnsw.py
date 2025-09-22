@@ -336,7 +336,16 @@ class KMeansHNSWEvaluator:
 
                 # Build full system (includes clustering + child mapping)
                 construction_start = time.time()
-                kmeans_hnsw = KMeansHNSW(base_index=base_index, **params)
+                kmeans_hnsw = KMeansHNSW(
+                    base_index=base_index,
+                    **params,
+                    adaptive_k_children=getattr(args, 'adaptive_k_children', False),
+                    k_children_scale=getattr(args, 'k_children_scale', 1.5),
+                    k_children_min=getattr(args, 'k_children_min', 100),
+                    k_children_max=getattr(args, 'k_children_max', None),
+                    diversify_max_assignments=getattr(args, 'diversify_max_assignments', None),
+                    repair_min_assignments=getattr(args, 'repair_min_assignments', None)
+                )
                 construction_time = time.time() - construction_start
                 print(f"  Built KMeansHNSW system in {construction_time:.2f}s")
 
@@ -674,6 +683,15 @@ if __name__ == "__main__":
     parser.add_argument('--query-size', type=int, default=50, help='Number of query vectors to use (default: 50)')
     parser.add_argument('--dimension', type=int, default=128, help='Vector dimensionality for synthetic data (if SIFT not loaded)')
     parser.add_argument('--no-sift', action='store_true', help='Force synthetic data even if SIFT files exist')
+    # Adaptive / diversification / repair options
+    parser.add_argument('--adaptive-k-children', action='store_true', help='Enable adaptive k_children based on avg cluster size')
+    parser.add_argument('--k-children-scale', type=float, default=1.5, help='Scale factor for adaptive k_children (default 1.5)')
+    parser.add_argument('--k-children-min', type=int, default=100, help='Minimum k_children when adaptive')
+    parser.add_argument('--k-children-max', type=int, default=None, help='Maximum k_children when adaptive (optional)')
+    parser.add_argument('--diversify-max-assignments', type=int, default=None, help='Max assignments per child (enable diversification)')
+    parser.add_argument('--repair-min-assignments', type=int, default=None, help='Min assignments per child during build repair (requires diversification)')
+    parser.add_argument('--manual-repair', action='store_true', help='After optimal build run manual repair regardless of diversification')
+    parser.add_argument('--manual-repair-min', type=int, default=None, help='Min assignments for manual repair (fallback chain: manual > repair > 1)')
     args = parser.parse_args()
 
     print("K-Means HNSW Parameter Tuning and Evaluation")
@@ -758,8 +776,20 @@ if __name__ == "__main__":
         print("\nBuilding system with optimal parameters...")
         optimal_kmeans_hnsw = KMeansHNSW(
             base_index=base_index,
-            **optimal['parameters']
+            **optimal['parameters'],
+            adaptive_k_children=args.adaptive_k_children,
+            k_children_scale=args.k_children_scale,
+            k_children_min=args.k_children_min,
+            k_children_max=args.k_children_max,
+            diversify_max_assignments=args.diversify_max_assignments,
+            repair_min_assignments=args.repair_min_assignments
         )
+
+        if args.manual_repair:
+            manual_min = args.manual_repair_min or args.repair_min_assignments or 1
+            print(f"\nManual repair step: ensuring each node has at least {manual_min} assignments...")
+            repair_stats = optimal_kmeans_hnsw.run_repair(min_assignments=manual_min)
+            print(f"Manual repair completed. Coverage={repair_stats['coverage_fraction']:.3f}")
         
         comparison = evaluator.compare_with_baselines(
             optimal_kmeans_hnsw,
@@ -790,6 +820,16 @@ if __name__ == "__main__":
             'sweep_results': sweep_results,
             'optimal_parameters': optimal,
             'baseline_comparison': comparison,
+            'adaptive_config': {
+                'adaptive_k_children': args.adaptive_k_children,
+                'k_children_scale': args.k_children_scale,
+                'k_children_min': args.k_children_min,
+                'k_children_max': args.k_children_max,
+                'diversify_max_assignments': args.diversify_max_assignments,
+                'repair_min_assignments': args.repair_min_assignments,
+                'manual_repair': args.manual_repair,
+                'manual_repair_min': args.manual_repair_min
+            },
             'evaluation_info': {
                 'dataset_size': len(base_vectors),
                 'query_size': len(query_vectors),
