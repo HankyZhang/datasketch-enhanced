@@ -1,5 +1,15 @@
 """
-Method 3 Parameter Tuning: K-Means HNSW System
+方法3参数调优：K-Means HNSW系统 (Method 3 Parameter Tuning: K-Means HNSW System)
+
+本模块提供K-Means HNSW系统的参数调优和优化功能。
+包含全面的评估、参数扫描和性能分析。
+
+功能特性:
+- 全面的参数扫描和优化
+- 基准对比评估 (HNSW基线、纯K-Means、K-Means HNSW)
+- 召回率和查询时间分析
+- 自适应参数调整
+- 结果保存和分析
 
 This module provides parameter tuning and optimization for the K-Means HNSW system.
 It includes comprehensive evaluation, parameter sweeps, and performance analysis.
@@ -9,21 +19,31 @@ import os
 import sys
 import time
 import json
+import argparse
+import random
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from itertools import product
 
-# Add parent directory to path
+# 添加父目录到路径 (Add parent directory to path)
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from method3.kmeans_hnsw import KMeansHNSW
 from hnsw.hnsw import HNSW
-# Switch to sklearn MiniBatchKMeans for pure k-means baseline
+# 使用sklearn MiniBatchKMeans作为纯k-means基线 (Switch to sklearn MiniBatchKMeans for pure k-means baseline)
 from sklearn.cluster import MiniBatchKMeans
 
 
 class KMeansHNSWEvaluator:
     """
-    Comprehensive evaluator for K-Means HNSW system performance.
+    K-Means HNSW系统性能全面评估器 (Comprehensive evaluator for K-Means HNSW system performance)
+    
+    此类提供了对K-Means HNSW系统的全面评估功能，包括：
+    - 真实值(Ground Truth)计算
+    - 召回率评估
+    - 参数扫描和优化
+    - 与基线方法的性能对比
+    
+    兼容方法1和方法2的现有评估框架。
     Compatible with existing evaluation frameworks from Methods 1 & 2.
     """
     
@@ -35,20 +55,20 @@ class KMeansHNSWEvaluator:
         distance_func: callable
     ):
         """
-        Initialize the evaluator.
+        初始化评估器 (Initialize the evaluator)
         
         Args:
-            dataset: Full dataset vectors (shape: [n_vectors, dim])
-            query_set: Query vectors (shape: [n_queries, dim])
-            query_ids: IDs for query vectors
-            distance_func: Distance function for ground truth computation
+            dataset: 完整数据集向量 (Full dataset vectors) - shape: [n_vectors, dim]
+            query_set: 查询向量 (Query vectors) - shape: [n_queries, dim]  
+            query_ids: 查询向量ID列表 (IDs for query vectors)
+            distance_func: 用于真实值计算的距离函数 (Distance function for ground truth computation)
         """
         self.dataset = dataset
         self.query_set = query_set
         self.query_ids = query_ids
         self.distance_func = distance_func
         
-        # Ground truth cache
+        # 真实值缓存 (Ground truth cache)
         self._ground_truth_cache = {}
     
     def compute_ground_truth(
@@ -57,20 +77,23 @@ class KMeansHNSWEvaluator:
         exclude_query_ids: bool = True
     ) -> Dict[int, List[Tuple[int, float]]]:
         """
-        Compute ground truth using brute force search.
+        使用暴力搜索计算真实值 (Compute ground truth using brute force search)
+        
+        通过对每个查询向量计算与所有数据向量的距离，找出真正的k个最近邻。
+        这是评估其他算法召回率的标准基准。
         
         Args:
-            k: Number of nearest neighbors
-            exclude_query_ids: Whether to exclude query IDs from results
+            k: 最近邻数量 (Number of nearest neighbors)
+            exclude_query_ids: 是否从结果中排除查询ID (Whether to exclude query IDs from results)
             
         Returns:
-            Dictionary mapping query_id to list of (neighbor_id, distance) tuples
+            字典：查询ID -> (邻居ID, 距离)元组列表 (Dictionary mapping query_id to list of (neighbor_id, distance) tuples)
         """
         cache_key = (k, exclude_query_ids)
         if cache_key in self._ground_truth_cache:
             return self._ground_truth_cache[cache_key]
         
-        print(f"Computing ground truth for {len(self.query_set)} queries (k={k})...")
+        print(f"正在计算 {len(self.query_set)} 个查询的真实值 (k={k})... (Computing ground truth for {len(self.query_set)} queries)")
         start_time = time.time()
         
         ground_truth = {}
@@ -80,20 +103,20 @@ class KMeansHNSWEvaluator:
             
             for j, data_vector in enumerate(self.dataset):
                 if exclude_query_ids and j == query_id:
-                    continue  # Skip the query itself
+                    continue  # 跳过查询本身 (Skip the query itself)
                 
                 distance = self.distance_func(query_vector, data_vector)
                 distances.append((distance, j))
             
-            # Sort by distance and take top-k
+            # 按距离排序并取前k个 (Sort by distance and take top-k)
             distances.sort()
             ground_truth[query_id] = distances[:k]
             
             if (i + 1) % 10 == 0:
-                print(f"  Processed {i + 1}/{len(self.query_set)} queries")
+                print(f"  已处理 {i + 1}/{len(self.query_set)} 个查询 (Processed {i + 1}/{len(self.query_set)} queries)")
         
         elapsed = time.time() - start_time
-        print(f"Ground truth computed in {elapsed:.2f}s")
+        print(f"真实值计算完成，耗时 {elapsed:.2f}秒 (Ground truth computed in {elapsed:.2f}s)")
         
         self._ground_truth_cache[cache_key] = ground_truth
         return ground_truth
@@ -107,22 +130,25 @@ class KMeansHNSWEvaluator:
         exclude_query_ids: bool = True
     ) -> Dict[str, Any]:
         """
-        Evaluate recall performance of the K-Means HNSW system.
+        评估K-Means HNSW系统的召回率性能 (Evaluate recall performance of the K-Means HNSW system)
+        
+        计算系统在给定参数下的召回率、查询时间等性能指标。
+        召回率 = 找到的真实邻居数 / 应该找到的邻居数
         
         Args:
-            kmeans_hnsw: The K-Means HNSW system to evaluate
-            k: Number of results to return
-            n_probe: Number of centroids to probe
-            ground_truth: Precomputed ground truth (optional)
-            exclude_query_ids: Whether to exclude query IDs from evaluation
+            kmeans_hnsw: 要评估的K-Means HNSW系统 (The K-Means HNSW system to evaluate)
+            k: 返回结果数量 (Number of results to return)
+            n_probe: 探测的聚类中心数量 (Number of centroids to probe)
+            ground_truth: 预计算的真实值(可选) (Precomputed ground truth, optional)
+            exclude_query_ids: 是否从评估中排除查询ID (Whether to exclude query IDs from evaluation)
             
         Returns:
-            Dictionary containing recall metrics and performance data
+            包含召回率指标和性能数据的字典 (Dictionary containing recall metrics and performance data)
         """
         if ground_truth is None:
             ground_truth = self.compute_ground_truth(k, exclude_query_ids)
         
-        print(f"Evaluating recall for {len(self.query_set)} queries (k={k}, n_probe={n_probe})...")
+        print(f"正在评估 {len(self.query_set)} 个查询的召回率 (k={k}, n_probe={n_probe})... (Evaluating recall)")
         start_time = time.time()
         
         total_correct = 0
@@ -267,36 +293,38 @@ class KMeansHNSWEvaluator:
         max_combinations: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform comprehensive parameter sweep for optimization.
+        执行全面的参数扫描优化 (Perform comprehensive parameter sweep for optimization)
+        
+        通过系统性地测试不同参数组合，找到最优的K-Means HNSW配置。
+        包括基线HNSW、纯K-Means和K-Means HNSW的对比评估。
         
         Args:
-            base_index: Base HNSW index to use
-            param_grid: Dictionary of parameters and their values to test
-            evaluation_params: Parameters for evaluation (k, n_probe_values)
-            max_combinations: Maximum number of combinations to test
+            base_index: 使用的基础HNSW索引 (Base HNSW index to use)
+            param_grid: 参数及其测试值的字典 (Dictionary of parameters and their values to test)
+            evaluation_params: 评估参数 (Parameters for evaluation) - k值, n_probe值等
+            max_combinations: 最大测试组合数 (Maximum number of combinations to test)
             
         Returns:
-            List of evaluation results for each parameter combination
+            每个参数组合的评估结果列表 (List of evaluation results for each parameter combination)
         """
-        print("Starting parameter sweep for K-Means HNSW...")
+        print("开始K-Means HNSW参数扫描... (Starting parameter sweep for K-Means HNSW)")
         
-        # Generate all parameter combinations
+        # 生成所有参数组合 (Generate all parameter combinations)
         param_names = list(param_grid.keys())
         param_values = list(param_grid.values())
         combinations = list(product(*param_values))
         
         if max_combinations and len(combinations) > max_combinations:
-            print(f"Limiting to {max_combinations} combinations out of {len(combinations)}")
-            import random
+            print(f"限制测试 {max_combinations} 个组合，总共 {len(combinations)} 个 (Limiting to {max_combinations} combinations out of {len(combinations)})")
             combinations = random.sample(combinations, max_combinations)
         
-        print(f"Testing {len(combinations)} parameter combinations...")
+        print(f"测试 {len(combinations)} 个参数组合... (Testing {len(combinations)} parameter combinations)")
         
         results = []
         k_values = evaluation_params.get('k_values', [10])
         n_probe_values = evaluation_params.get('n_probe_values', [5, 10, 20])
         
-        # Precompute ground truth for all k values
+        # 预计算所有k值的真实值 (Precompute ground truth for all k values)
         ground_truths = {}
         for k in k_values:
             ground_truths[k] = self.compute_ground_truth(k)
@@ -634,22 +662,34 @@ def save_results(results: Dict[str, Any], filename: str):
 
 
 def load_sift_data():
-    """Load SIFT dataset for evaluation."""
+    """
+    加载SIFT数据集用于评估 (Load SIFT dataset for evaluation)
+    
+    SIFT (Scale-Invariant Feature Transform) 是计算机视觉领域的经典特征描述符。
+    该数据集包含100万个128维的特征向量，常用于相似性搜索算法的基准测试。
+    
+    Returns:
+        tuple: (base_vectors, query_vectors) 或 (None, None) 如果加载失败
+    """
     sift_dir = os.path.join(os.path.dirname(__file__), '..', 'sift')
     
     try:
         def read_fvecs(path: str, max_vectors: Optional[int] = None) -> np.ndarray:
-            """Read .fvecs file (FAISS format). Each vector stored as: int32 dim + dim float32.
+            """
+            读取.fvecs文件 (FAISS格式)。每个向量存储为：int32维度 + 维度个float32值。
+            此实现通过先读取int32头部来避免解析错误。
+            
+            Read .fvecs file (FAISS format). Each vector stored as: int32 dim + dim float32.
             This implementation avoids mis-parsing by reading int32 header first.
             """
             if not os.path.exists(path):
                 raise FileNotFoundError(path)
             raw = np.fromfile(path, dtype=np.int32)
             if raw.size == 0:
-                raise ValueError(f"Empty fvecs file: {path}")
+                raise ValueError(f"空的fvecs文件: {path} (Empty fvecs file)")
             dim = raw[0]
             if dim <= 0 or dim > 4096:
-                raise ValueError(f"Unreasonable vector dimension {dim} parsed from {path}")
+                raise ValueError(f"不合理的向量维度 {dim}，解析自 {path} (Unreasonable vector dimension)")
             record_size = dim + 1
             count = raw.size // record_size
             raw = raw.reshape(count, record_size)
@@ -661,66 +701,84 @@ def load_sift_data():
         base_path = os.path.join(sift_dir, 'sift_base.fvecs')
         query_path = os.path.join(sift_dir, 'sift_query.fvecs')
 
-        # Limit for tuning demo to keep runtime reasonable
+        # 为调优演示限制数量以保持合理的运行时间 (Limit for tuning demo to keep runtime reasonable)
         base_vectors = read_fvecs(base_path, max_vectors=50000)
         query_vectors = read_fvecs(query_path, max_vectors=1000)
 
+        print(f"已加载SIFT数据: {base_vectors.shape[0]} 个基础向量, "
+              f"{query_vectors.shape[0]} 个查询向量, 维度 {base_vectors.shape[1]}")
         print(f"Loaded SIFT data: {base_vectors.shape[0]} base vectors, "
               f"{query_vectors.shape[0]} query vectors, dimension {base_vectors.shape[1]}")
 
         return base_vectors, query_vectors
     
     except Exception as e:
-        print(f"Error loading SIFT data: {e}")
-        print("Using synthetic data instead...")
+        print(f"加载SIFT数据时出错: {e} (Error loading SIFT data)")
+        print("改用合成数据... (Using synthetic data instead)")
         return None, None
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="K-Means HNSW Parameter Tuning and Evaluation")
-    parser.add_argument('--dataset-size', type=int, default=10000, help='Number of base vectors to use (default: 10000 ~1w)')
-    parser.add_argument('--query-size', type=int, default=50, help='Number of query vectors to use (default: 50)')
-    parser.add_argument('--dimension', type=int, default=128, help='Vector dimensionality for synthetic data (if SIFT not loaded)')
-    parser.add_argument('--no-sift', action='store_true', help='Force synthetic data even if SIFT files exist')
-    # Adaptive / diversification / repair options
-    parser.add_argument('--adaptive-k-children', action='store_true', help='Enable adaptive k_children based on avg cluster size')
-    parser.add_argument('--k-children-scale', type=float, default=1.5, help='Scale factor for adaptive k_children (default 1.5)')
-    parser.add_argument('--k-children-min', type=int, default=100, help='Minimum k_children when adaptive')
-    parser.add_argument('--k-children-max', type=int, default=None, help='Maximum k_children when adaptive (optional)')
-    parser.add_argument('--diversify-max-assignments', type=int, default=None, help='Max assignments per child (enable diversification)')
-    parser.add_argument('--repair-min-assignments', type=int, default=None, help='Min assignments per child during build repair (requires diversification)')
-    parser.add_argument('--manual-repair', action='store_true', help='After optimal build run manual repair regardless of diversification')
-    parser.add_argument('--manual-repair-min', type=int, default=None, help='Min assignments for manual repair (fallback chain: manual > repair > 1)')
+    parser = argparse.ArgumentParser(description="K-Means HNSW参数调优和评估 (K-Means HNSW Parameter Tuning and Evaluation)")
+    
+    # 数据集选项 (Dataset options)
+    parser.add_argument('--dataset-size', type=int, default=10000, 
+                        help='使用的基础向量数量 (默认: 10000) (Number of base vectors to use)')
+    parser.add_argument('--query-size', type=int, default=50, 
+                        help='使用的查询向量数量 (默认: 50) (Number of query vectors to use)')
+    parser.add_argument('--dimension', type=int, default=128, 
+                        help='合成数据的向量维度 (如果未加载SIFT) (Vector dimensionality for synthetic data)')
+    parser.add_argument('--no-sift', action='store_true', 
+                        help='强制使用合成数据，即使SIFT文件存在 (Force synthetic data even if SIFT files exist)')
+    
+    # 自适应/多样化/修复选项 (Adaptive/diversification/repair options)
+    parser.add_argument('--adaptive-k-children', action='store_true', 
+                        help='启用基于平均聚类大小的自适应k_children (Enable adaptive k_children based on avg cluster size)')
+    parser.add_argument('--k-children-scale', type=float, default=1.5, 
+                        help='自适应k_children的缩放因子 (默认1.5) (Scale factor for adaptive k_children)')
+    parser.add_argument('--k-children-min', type=int, default=100, 
+                        help='自适应时的最小k_children (Minimum k_children when adaptive)')
+    parser.add_argument('--k-children-max', type=int, default=None, 
+                        help='自适应时的最大k_children (可选) (Maximum k_children when adaptive)')
+    parser.add_argument('--diversify-max-assignments', type=int, default=None, 
+                        help='每个子节点的最大分配数 (启用多样化) (Max assignments per child - enable diversification)')
+    parser.add_argument('--repair-min-assignments', type=int, default=None, 
+                        help='构建修复期间每个子节点的最小分配数 (需要多样化) (Min assignments per child during build repair)')
+    parser.add_argument('--manual-repair', action='store_true', 
+                        help='在最优构建后运行手动修复 (Run manual repair after optimal build)')
+    parser.add_argument('--manual-repair-min', type=int, default=None, 
+                        help='手动修复的最小分配数 (Min assignments for manual repair)')
     args = parser.parse_args()
 
-    print("K-Means HNSW Parameter Tuning and Evaluation")
-    print(f"Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
+    print("🔬 K-Means HNSW参数调优和评估系统 (K-Means HNSW Parameter Tuning and Evaluation)")
+    print(f"📊 请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
+    print(f"   Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
     
-    # Try to load SIFT data, fall back to synthetic unless disabled
+    # 尝试加载SIFT数据，失败则使用合成数据 (Try to load SIFT data, fall back to synthetic unless disabled)
     base_vectors, query_vectors = (None, None)
     if not args.no_sift:
         base_vectors, query_vectors = load_sift_data()
     
     if base_vectors is None:
-        # Create synthetic data
-        print("Creating synthetic dataset...")
+        # 创建合成数据 (Create synthetic data)
+        print("🎲 创建合成数据集... (Creating synthetic dataset)")
         base_vectors = np.random.randn(max(args.dataset_size, 10000), args.dimension).astype(np.float32)
         query_vectors = np.random.randn(max(args.query_size, 100), args.dimension).astype(np.float32)
     
-    # Slice to requested sizes (cap by available)
+    # 切片到请求的大小 (按可用量限制) (Slice to requested sizes)
     if len(base_vectors) > args.dataset_size:
         base_vectors = base_vectors[:args.dataset_size]
     if len(query_vectors) > args.query_size:
         query_vectors = query_vectors[:args.query_size]
-    print(f"Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
+    print(f"📈 使用基础向量: {len(base_vectors)} | 查询: {len(query_vectors)} | 维度: {base_vectors.shape[1]}")
+    print(f"   Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
     query_ids = list(range(len(query_vectors)))
     
-    # Distance function
+    # 距离函数 (Distance function)
     distance_func = lambda x, y: np.linalg.norm(x - y)
     
-    # Build base HNSW index
-    print("Building base HNSW index...")
+    # 构建基础HNSW索引 (Build base HNSW index)
+    print("🏗️  构建基础HNSW索引... (Building base HNSW index)")
     base_index = HNSW(distance_func=distance_func, m=16, ef_construction=100)
     
     for i, vector in enumerate(base_vectors):
