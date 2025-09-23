@@ -269,40 +269,55 @@ class KMeansHNSW:
     def _assign_children_via_hnsw(self):
         """Assign children to each centroid using HNSW search."""
         print(f"Assigning children via HNSW (ef={self.child_search_ef})...")
-        
-        assignment_counts = defaultdict(int) if self.diversify_max_assignments else None
-        
+        # We need assignment counts if either diversification OR repair is requested
+        need_counts = (self.diversify_max_assignments is not None) or (self.repair_min_assignments is not None)
+        assignment_counts = defaultdict(int) if need_counts else None
+
         for i, centroid_id in enumerate(self.centroid_ids):
             centroid_vector = self.centroids[i]
-            
+
             # Find nearest neighbors using HNSW
             neighbors = self.base_index.query(
-                centroid_vector, 
+                centroid_vector,
                 k=self.k_children,
                 ef=self.child_search_ef
             )
-            
+
             # Extract children and apply diversification if enabled
             children = []
             for node_id, distance in neighbors:
                 if self.diversify_max_assignments is None:
                     children.append(node_id)
                     self.child_vectors[node_id] = self.base_index[node_id]
+                    if assignment_counts is not None:
+                        assignment_counts[node_id] += 1  # count even without diversification for later repair
                 else:
                     # Diversification: limit assignments per child
                     if assignment_counts[node_id] < self.diversify_max_assignments:
                         children.append(node_id)
                         assignment_counts[node_id] += 1
                         self.child_vectors[node_id] = self.base_index[node_id]
-            
+
             self.parent_child_map[centroid_id] = children
-            
+
             if (i + 1) % 10 == 0 or i == 0:
-                print(f"Processed {i + 1}/{self.n_clusters} centroids, "
-                      f"found {len(children)} children for centroid {i}")
-        
-        # Repair phase: ensure minimum assignments
-        if self.repair_min_assignments and assignment_counts is not None:
+                print(
+                    f"Processed {i + 1}/{self.n_clusters} centroids, "
+                    f"found {len(children)} children for centroid {i}"
+                )
+
+        # Repair phase: ensure minimum assignments (now allowed even without diversification)
+        if self.repair_min_assignments:
+            if assignment_counts is None:
+                from collections import defaultdict as _dd
+                assignment_counts = _dd(int)
+                for child_list in self.parent_child_map.values():
+                    for cid in child_list:
+                        assignment_counts[cid] += 1
+            if self.diversify_max_assignments is None:
+                print(
+                    f"(Info) Diversification disabled but repair_min_assignments={self.repair_min_assignments}; running repair..."
+                )
             self._repair_child_assignments(assignment_counts)
     
     def _repair_child_assignments(self, assignment_counts: Dict[Hashable, int]):
@@ -353,8 +368,14 @@ class KMeansHNSW:
         # Report coverage after repair
         final_assigned = set(assignment_counts.keys())
         coverage = len(final_assigned) / len(all_base_nodes)
-        print(f"Repair completed. Final coverage: {coverage:.3f} "
-              f"({len(final_assigned)}/{len(all_base_nodes)} nodes)")
+        # Update statistics (these may have changed due to new assignments)
+        self.stats['coverage_fraction'] = coverage
+        self._update_child_stats()
+        print(
+            f"Repair completed. Final coverage: {coverage:.3f} "
+            f"({len(final_assigned)}/{len(all_base_nodes)} nodes); "
+            f"unique children now {self.stats['num_children']}"
+        )
     
     def _build_centroid_index(self):
         """Build vectorized centroid matrix for fast Stage 1 search."""
@@ -513,12 +534,21 @@ class KMeansHNSW:
         if rebuild:
             print("Rebuilding K-Means HNSW system with new parameters...")
             self._build_kmeans_hnsw_system()
+
+    def _update_child_stats(self):
+        """Internal helper to recompute child-related statistics."""
+        self.stats['num_children'] = len(self.child_vectors)
+        self.stats['avg_children_per_centroid'] = (
+            self.stats['num_children'] / self.n_clusters if self.n_clusters else 0.0
+        )
     
     def get_stats(self) -> Dict:
         """Get comprehensive statistics about the system."""
+        # Always refresh dynamic counts before returning
+        self._update_child_stats()
         stats = self.stats.copy()
         stats.update(self._overlap_stats)
-        
+
         # Add K-Means specific stats
         if self._cluster_info:
             stats.update({
@@ -531,7 +561,7 @@ class KMeansHNSW:
                     'max': self._cluster_info.get('max_cluster_size')
                 }
             })
-        
+
         return stats
     
     def get_centroid_info(self) -> Dict:
@@ -621,6 +651,8 @@ class KMeansHNSW:
             print(f"Running manual repair to guarantee >= {min_assignments} assignments per node...")
         self._repair_child_assignments(assignment_counts)
         self._compute_mapping_diagnostics()
+        # Ensure stats reflect any added nodes
+        self._update_child_stats()
         return {
             'coverage_fraction': self.stats.get('coverage_fraction', 0.0),
             'avg_children_per_centroid': self.stats.get('avg_children_per_centroid', 0.0)
