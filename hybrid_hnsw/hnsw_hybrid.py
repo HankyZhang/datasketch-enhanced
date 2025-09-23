@@ -199,10 +199,16 @@ class HNSWHybrid:
         return parent_nodes
     
     def _precompute_child_mappings(self, parent_nodes: List[Hashable]):
-        """Precompute child node mappings for each parent with optional diversification & repair."""
-        print(f"Precomputing child mappings (method={self.parent_child_method})...")
+        """Precompute child node mappings for each parent with optional diversification & repair.
 
-        assignment_counts: Dict[Hashable, int] = defaultdict(int) if self.diversify_max_assignments else None
+        This version aligns logic with KMeansHNSW so that:
+        - assignment_counts are collected when either diversification OR repair is requested
+        - repair can run even if diversification is disabled
+        - coverage later can incorporate parent nodes to reach 1.0
+        """
+        print(f"Precomputing child mappings (method={self.parent_child_method})...")
+        need_counts = (self.diversify_max_assignments is not None) or (self.repair_min_assignments is not None)
+        assignment_counts: Dict[Hashable, int] = defaultdict(int) if need_counts else None
 
         for i, parent_id in enumerate(parent_nodes):
             if i % max(1, len(parent_nodes)//10 or 1) == 0:
@@ -211,10 +217,8 @@ class HNSWHybrid:
             parent_vector = self.base_index[parent_id]
             self.parent_vectors[parent_id] = parent_vector
 
-            # Generate raw neighbor candidates
+            # --- Generate neighbor candidates ---
             if self.parent_child_method == 'brute':
-                # Brute force distances against all nodes in base index
-                # Assuming node ids are iterable via base_index._nodes
                 raw: List[Tuple[float, Hashable]] = []
                 for nid in self.base_index._nodes.keys():
                     if nid == parent_id:
@@ -225,7 +229,6 @@ class HNSWHybrid:
                 raw.sort()
                 neighbor_ids = [nid for _, nid in raw[: self.k_children + 1]]
             else:  # approx
-                # Ensure ef is at least as large as k to get requested number of neighbors
                 effective_ef = max(self.approx_ef, self.k_children + 1)
                 try:
                     neighbors = self.base_index.query(parent_vector, k=self.k_children + 1, ef=effective_ef)
@@ -233,12 +236,12 @@ class HNSWHybrid:
                     neighbors = self.base_index.query(parent_vector, k=self.k_children + 1)
                 neighbor_ids = [nid for nid, _ in neighbors]
 
-            # Exclude self
+            # Exclude self if present
             if parent_id in neighbor_ids:
                 neighbor_ids = [nid for nid in neighbor_ids if nid != parent_id]
 
-            # Diversification (limit global assignments per point)
-            if assignment_counts is not None:
+            # --- Diversification (optional) ---
+            if assignment_counts is not None and self.diversify_max_assignments is not None:
                 accepted: List[Hashable] = []
                 skipped: List[Hashable] = []
                 limit = self.diversify_max_assignments
@@ -250,7 +253,6 @@ class HNSWHybrid:
                         assignment_counts[nid] += 1
                     else:
                         skipped.append(nid)
-                # Backfill if under length
                 if len(accepted) < self.k_children:
                     for nid in skipped:
                         if len(accepted) >= self.k_children:
@@ -259,57 +261,106 @@ class HNSWHybrid:
                 child_ids = accepted
             else:
                 child_ids = neighbor_ids[: self.k_children]
+                if assignment_counts is not None:
+                    for nid in child_ids:
+                        assignment_counts[nid] += 1
 
+            # Store child vectors
             for cid in child_ids:
                 if cid not in self.child_vectors:
                     try:
                         self.child_vectors[cid] = self.base_index[cid]
                     except Exception:
                         continue
-
             self.parent_child_map[parent_id] = child_ids
 
-        # Repair phase: ensure every child that appears too few times is assigned to closest parents
-        if self.repair_min_assignments and assignment_counts is not None:
-            # Find nodes with low coverage (already assigned but less than min)
-            low_coverage = [nid for nid, c in assignment_counts.items() if c < self.repair_min_assignments]
-            
-            # Find completely unassigned nodes (not in assignment_counts at all)
-            all_base_nodes = set(self.base_index._nodes.keys()) if hasattr(self.base_index, '_nodes') else set()
-            assigned_nodes = set(assignment_counts.keys())
-            unassigned_nodes = list(all_base_nodes - assigned_nodes - set(self.parent_ids))  # Exclude parent nodes
-            
-            # Combine low coverage and unassigned nodes
-            nodes_to_repair = low_coverage + unassigned_nodes
-            
-            if nodes_to_repair:
-                print(f"Repairing {len(low_coverage)} low-coverage + {len(unassigned_nodes)} unassigned points (min={self.repair_min_assignments})...")
-                # Build parent matrix if absent
-                if self._parent_matrix is None:
-                    self._build_parent_index()
-                P = self._parent_matrix.shape[0]
-                for nid in nodes_to_repair:
-                    try:
-                        vec = self.base_index[nid]
-                        diffs = self._parent_matrix - vec
-                        dists = np.linalg.norm(diffs, axis=1)
-                        order = np.argsort(dists)
-                        for idx in order:
-                            pid = self.parent_ids[idx]
-                            if nid not in self.parent_child_map[pid]:
-                                self.parent_child_map[pid].append(nid)
-                                assignment_counts[nid] += 1
-                                # Add to child_vectors if not already present
-                                if nid not in self.child_vectors:
-                                    self.child_vectors[nid] = vec
-                            if assignment_counts[nid] >= self.repair_min_assignments:
-                                break
-                    except Exception as e:
-                        print(f"[WARN] Failed to repair node {nid}: {e}")
-                        continue
+        # --- Repair phase (optional) ---
+        if self.repair_min_assignments:
+            if assignment_counts is None:
+                assignment_counts = defaultdict(int)
+                for plist in self.parent_child_map.values():
+                    for cid in plist:
+                        assignment_counts[cid] += 1
+            self._repair_child_assignments(assignment_counts)
 
-        # Coverage & overlap stats
+        # Diagnostics
         self._compute_mapping_diagnostics()
+
+    def _repair_child_assignments(self, assignment_counts: Dict[Hashable, int]):
+        """Repair child assignments ensuring coverage similar to KMeansHNSW.
+
+        Differences vs KMeans variant:
+        - Parent nodes already reside at higher levels; we count them toward coverage without forcing self-assignment.
+        - Coverage metric later adds parent count to child union so final coverage can reach 1.0.
+        """
+        min_req = self.repair_min_assignments
+        if not min_req:
+            return
+        all_base_nodes = set(self.base_index._nodes.keys()) if hasattr(self.base_index, '_nodes') else set()
+        parent_set = set(self.parent_ids)
+
+        # Nodes already appearing as children
+        assigned_nodes = set(assignment_counts.keys())
+        # Nodes that are neither parents nor assigned anywhere
+        unassigned_nodes = list(all_base_nodes - assigned_nodes - parent_set)
+
+        # Nodes assigned but below threshold
+        low_coverage = [nid for nid, c in assignment_counts.items() if c < min_req]
+        targets = low_coverage + unassigned_nodes
+
+        if not targets:
+            return
+        print(f"Repair phase: fixing {len(low_coverage)} low-coverage + {len(unassigned_nodes)} unassigned nodes (min={min_req})...")
+
+        # Ensure parent matrix for distance computation
+        if self._parent_matrix is None:
+            self._build_parent_index()
+        parent_mat = self._parent_matrix
+        if parent_mat is None:
+            print("[WARN] Cannot repair: parent matrix missing")
+            return
+
+        for nid in targets:
+            try:
+                vec = self.base_index[nid]
+            except Exception:
+                continue
+            current = assignment_counts.get(nid, 0)
+            needed = min_req - current
+            if needed <= 0:
+                continue
+            diffs = parent_mat - vec
+            dists = np.linalg.norm(diffs, axis=1)
+            order = np.argsort(dists)
+            added = 0
+            for idx in order:
+                pid = self.parent_ids[idx]
+                # Avoid adding parent as its own child; skip if same id (already counted separately for coverage)
+                if nid == pid:
+                    continue
+                plist = self.parent_child_map.setdefault(pid, [])
+                if nid not in plist:
+                    plist.append(nid)
+                    if nid not in self.child_vectors:
+                        try:
+                            self.child_vectors[nid] = self.base_index[nid]
+                        except Exception:
+                            pass
+                    assignment_counts[nid] += 1
+                    added += 1
+                if assignment_counts[nid] >= min_req:
+                    break
+            if added == 0 and assignment_counts.get(nid, 0) < min_req:
+                print(f"[WARN] Node {nid} still under-assigned ({assignment_counts.get(nid,0)}/{min_req}) after repair attempts")
+
+        # After repair, issue quick coverage summary (excluding parent nodes)
+        covered = set().union(*[set(v) for v in self.parent_child_map.values() if v]) if self.parent_child_map else set()
+        eff_coverage = (len(covered) + len(parent_set)) / len(all_base_nodes) if all_base_nodes else 0.0
+        raw_child_coverage = len(covered) / len(all_base_nodes) if all_base_nodes else 0.0
+        print(f"Repair complete. Raw child coverage={raw_child_coverage:.3f}; effective coverage (including parents)={eff_coverage:.3f}")
+        # Store interim stats; final _compute_mapping_diagnostics will overwrite
+        self.stats['coverage_fraction'] = eff_coverage
+        self.stats['raw_child_coverage'] = raw_child_coverage
     
     def _build_parent_index(self):
         """Vectorize parent vectors for fast Stage 1 distance computation."""
@@ -457,6 +508,50 @@ class HNSWHybrid:
                 if self.stats['num_parents'] > 0 else 0.0
             )
 
+    # -------------------- Public Maintenance / Repair API --------------------
+    def run_repair(self, min_assignments: int, verbose: bool = True) -> Dict[str, float]:
+        """Run a manual repair phase to enforce minimum assignments per base node.
+
+        与 KMeansHNSW.run_repair 类似：确保每个底层节点(非 parent) 至少被分配到 `min_assignments` 个 parent。
+        若之前构建时未开启 diversify 也可单独调用。
+
+        Args:
+            min_assignments: 每个节点需要的最少父分配次数
+            verbose: 是否打印进度信息
+
+        Returns:
+            包含覆盖率信息的字典：
+              coverage_fraction: 计入父节点后的有效覆盖
+              raw_child_coverage: 仅孩子集合的覆盖
+              num_children: repair 后唯一 child 数
+        """
+        if not self.parent_child_map:
+            raise RuntimeError("Parent-child map empty; build hybrid index first.")
+
+        from collections import defaultdict as _dd
+        assignment_counts = _dd(int)
+        for plist in self.parent_child_map.values():
+            for cid in plist:
+                assignment_counts[cid] += 1
+
+        self.repair_min_assignments = min_assignments
+        if verbose:
+            print(f"Running manual hybrid repair (min_assignments={min_assignments}) ...")
+        self._repair_child_assignments(assignment_counts)
+        # Recompute diagnostics after repair
+        self._compute_mapping_diagnostics()
+        # Refresh dynamic stats
+        self.stats['num_children'] = len(self.child_vectors)
+        self.stats['avg_children_per_parent'] = (
+            self.stats['num_children'] / self.stats['num_parents']
+            if self.stats.get('num_parents', 0) else 0.0
+        )
+        return {
+            'coverage_fraction': self.stats.get('coverage_fraction', 0.0),
+            'raw_child_coverage': self.stats.get('raw_child_coverage', 0.0),
+            'num_children': self.stats.get('num_children', 0)
+        }
+
     def get_recommended_ef(self, target_recall: float = 0.95) -> int:
         """
         Get recommended approx_ef value based on dataset characteristics.
@@ -514,8 +609,14 @@ class HNSWHybrid:
             return
         union_all = set().union(*all_children_sets)
         total_points = len(self.base_index._nodes) if hasattr(self.base_index, '_nodes') else None
-        coverage_fraction = len(union_all) / total_points if total_points else 0.0
-        self.stats['coverage_fraction'] = coverage_fraction
+        # Raw child coverage excludes parent nodes (since parents generally not listed among their own children)
+        raw_child_coverage = len(union_all) / total_points if total_points else 0.0
+        # Effective coverage counts parent nodes themselves as 'covered' conceptual clusters
+        effective_coverage = (len(union_all) + len(self.parent_ids)) / total_points if total_points else 0.0
+        if effective_coverage > 1.0:
+            effective_coverage = 1.0  # Safety clamp
+        self.stats['raw_child_coverage'] = raw_child_coverage
+        self.stats['coverage_fraction'] = effective_coverage
 
         # Sample pairwise Jaccard overlaps
         overlaps: List[float] = []

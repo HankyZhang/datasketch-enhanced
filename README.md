@@ -1,21 +1,21 @@
 # HNSW Hybrid Two-Stage Retrieval System
 
-🚀 **Advanced HNSW implementation with hybrid two-stage retrieval architecture**
+🚀 Advanced HNSW implementation with a level-based (HNSW parents) and K-Means based two-stage retrieval architecture.
 
-> Update: K-Means based components (Method 3 / two-stage variants) now use sklearn `MiniBatchKMeans` instead of the previous custom implementation for improved stability and faster construction on large datasets.
-
-A high-performance implementation of the HNSW (Hierarchical Navigable Small World) algorithm featuring an innovative hybrid two-stage retrieval system that significantly improves recall performance.
+Update highlights:
+- Method 3 (K-Means + HNSW) now uses sklearn `MiniBatchKMeans` for stability & speed.
+- Unified public hybrid class name: `HNSWHybrid` (old placeholder `HybridHNSWIndex` removed).
+- Added optional diversification (`diversify_max_assignments`) and repair (`repair_min_assignments` / programmatic `run_repair`) mechanisms for parent→child coverage control.
 
 ## 🆕 Latest: HNSW Hybrid Two-Stage System
 
 The **HNSW Hybrid Two-Stage Retrieval System** transforms a standard HNSW into a two-stage retrieval architecture for improved recall performance:
 
 ### 🔥 Core Features
-- **Two-Stage Search**: Coarse filtering (parent nodes) + Fine filtering (child nodes)
-- **Enhanced Recall**: 62.86% Recall@10 performance with optimized parameters
-- **Configurable Parameters**: Tunable k_children and n_probe for precision-efficiency trade-offs
-- **Scalable Design**: Supports large-scale datasets up to millions of vectors
-- **Comprehensive Evaluation**: Complete Recall@K metrics and parameter tuning framework
+- Two-stage search: coarse (parents) → fine (children)
+- Configurable: `k_children`, `n_probe`, `approx_ef`, diversification & repair
+- Coverage diagnostics: `coverage_fraction`, `raw_child_coverage`, assignment stats
+- Scales to large datasets; evaluation utilities included
 
 ## 🌟 Key Features
 
@@ -39,8 +39,8 @@ datasketch-enhanced/
 │   ├── hnsw.py                  # Core HNSW algorithm
 │   ├── version.py               # Version information
 │   └── __init__.py              # Package initialization
-├── hybrid_hnsw/                 # � Hybrid Two-Stage HNSW
-│   ├── hnsw_hybrid.py           # Hybrid two-stage implementation
+├── hybrid_hnsw/                 # 🔀 Level-based Hybrid Two-Stage HNSW
+│   ├── hnsw_hybrid.py           # `HNSWHybrid` implementation
 │   └── __init__.py              # Package initialization
 ├── optimized_hnsw/              # ⚡ Optimized HNSW Implementation
 │   └── __init__.py              # Package initialization
@@ -57,104 +57,54 @@ datasketch-enhanced/
 
 ### Installation
 ```bash
-pip install numpy
 git clone https://github.com/HankyZhang/datasketch-enhanced.git
 cd datasketch-enhanced
-## 🚀 Quick Start
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/HankyZhang/datasketch-enhanced.git
-cd datasketch-enhanced
-
-# Install in development mode
 pip install -e .
 ```
 
-### Basic Usage
-
-#### Standard HNSW Usage
+### Standard HNSW Example
 ```python
-from hnsw import HNSW
+from hnsw.hnsw import HNSW
 import numpy as np
 
-# Create random data
-data = np.random.random((1000, 50))
-
-# Initialize HNSW index  
-distance_func = lambda x, y: np.linalg.norm(x - y)
-index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
-
-# Insert data
-for i, vector in enumerate(data):
-    index.insert(i, vector)
-
-# Search for nearest neighbors
-query = np.random.random(50)
-neighbors = index.query(query, k=10)
-
-print(f"Found {len(neighbors)} nearest neighbors")
+data = np.random.random((1000, 64)).astype(np.float32)
+dist = lambda a, b: np.linalg.norm(a - b)
+index = HNSW(distance_func=dist, m=16, ef_construction=200)
+for i, v in enumerate(data):
+    index.insert(i, v)
+q = np.random.random(64).astype(np.float32)
+print(index.query(q, k=10))
 ```
 
-#### 🆕 HNSW Hybrid Two-Stage Retrieval System
+### Level-Based Hybrid (Parents from HNSW Level)
 ```python
-from hybrid_hnsw.hnsw_hybrid import HybridHNSWIndex
-import numpy as np
-
-# Create synthetic dataset
-data = np.random.random((5000, 128))
-
-# Initialize hybrid index
-hybrid_index = HybridHNSWIndex(
-    distance_func=lambda x, y: np.linalg.norm(x - y),
-    m=16,
-    ef_construction=200,
-    k_children=50,
-    n_probe=10
-)
-
-# Build the index
-for i, vector in enumerate(data):
-    hybrid_index.insert(i, vector)
-
-# Search with hybrid two-stage retrieval
-query = np.random.random(128)
-results = hybrid_index.search(query, k=10)
-print(f"Hybrid search found {len(results)} results")
-```
-```python
-from hnsw import HNSW
+from hnsw.hnsw import HNSW
 from hybrid_hnsw import HNSWHybrid
 import numpy as np
 
-# Create synthetic dataset
-dataset = {i: np.random.random(128) for i in range(5000)}  # 5K vectors, 128 dimensions
+vectors = np.random.random((5000, 128)).astype(np.float32)
+dist = lambda a, b: np.linalg.norm(a - b)
+base = HNSW(distance_func=dist, m=16, ef_construction=200)
+for i, v in enumerate(vectors):
+    base.insert(i, v)
 
-# Build base HNSW index
-distance_func = lambda x, y: np.linalg.norm(x - y)
-base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
-
-# Insert vectors (excluding queries)
-for i, vector in enumerate(dataset):
-    if i not in query_ids:
-# Insert vectors
-base_index.update(dataset)
-
-# Build hybrid index
-hybrid_index = HNSWHybrid(
-    base_index=base_index,
-    parent_level=2,          # Extract parents from level 2
-    k_children=1000         # 1000 children per parent
+hybrid = HNSWHybrid(
+    base_index=base,
+    parent_level=2,
+    k_children=800,
+    approx_ef=300,
+    diversify_max_assignments=None,
+    repair_min_assignments=None
 )
 
-# Simple query example
-query = np.random.random(128)
-results = hybrid_index.search(query, k=10)
+query = np.random.random(128).astype(np.float32)
+results = hybrid.search(query, k=10, n_probe=12)
+print('Top IDs:', [r[0] for r in results])
+print('Coverage:', hybrid.get_stats().get('coverage_fraction'))
 
-print(f"Found {len(results)} results")
-print(f"First result: {results[0]}")
+# (Optional) enforce coverage post-build
+hybrid.run_repair(2)
+print('Coverage after repair:', hybrid.get_stats().get('coverage_fraction'))
 ```
 
 ## 🛠️ Advanced Usage
@@ -171,34 +121,39 @@ python project_demo.py
 python test_structure.py
 ```
 
-### Parameter Tuning
-The hybrid (parent_level based) and the MiniBatchKMeans + HNSW (Method 3) systems support these key parameters:
+### Parameter Tuning (Key Parameters)
+| Parameter | Applies To | Purpose |
+|-----------|-----------|---------|
+| `parent_level` | `HNSWHybrid` | HNSW level used as parent set |
+| `n_clusters` | `KMeansHNSW` | Number of K-Means centroids (parents) |
+| `k_children` | Both | Target children per parent (before diversification/repair) |
+| `n_probe` | Both | Parents probed at query time |
+| `approx_ef` | `HNSWHybrid` | Width of approximate child gathering |
+| `child_search_ef` | `KMeansHNSW` | HNSW ef used when filling children per centroid |
+| `diversify_max_assignments` | Both | Upper bound per child (load balancing) |
+| `repair_min_assignments` | Both | Minimum assignments per child during build |
 
-- **`parent_level`** (hybrid variant only): HNSW level to extract parent nodes from (default: 2)
-- **`n_clusters`** (KMeansHNSW): Number of MiniBatchKMeans clusters (acts as parents)
-- **`k_children`**: Number of child nodes per parent (default: 1000)
-- **`n_probe`**: Number of parent nodes / centroids to probe during search (default: 15)
-- **MiniBatchKMeans params** via `kmeans_params`: `max_iter`, `n_init`, `batch_size`, `tol`, `random_state`
+Repair notes:
+- Setting `repair_min_assignments ≥ 2` during build generally lifts `coverage_fraction` close to 1.0.
+- If omitted, you can still call `run_repair(min_assignments)` later (programmatic only) for both `HNSWHybrid` and `KMeansHNSW`.
+- `coverage_fraction` counts parents + unique children; `raw_child_coverage` counts only child set.
 
 ## 📊 Performance Results
 
-### Benchmark Results (5K vectors, 128 dimensions)
-- **Recall@10**: 62.86%
-- **Average Query Time**: 5.43ms
-- **Parent Nodes**: 12 nodes managing 1,438 children
-- **Memory Efficiency**: Optimized data structures with minimal overhead
+### Example Small-Scale Metrics (Illustrative)
+- Recall@10 mid-range (depends on config and dataset)
+- Query latency driven by `n_probe * k_children` candidate size
+- Diversification smooths parent load; repair ensures coverage
 
-### Key Performance Insights
-- **Two-stage approach** provides systematic search within precomputed regions
-- **Parameter tuning** allows precision-efficiency trade-offs
-- **Scalable architecture** maintains performance at larger scales
+Tune `k_children`, `n_probe`, and ef parameters jointly for best trade-off.
 
 ## 📚 Documentation
 
-- **[Algorithm Principles](doc_md/HNSW_Hybrid_Algorithm_Principles.md)**: Core concepts and theory
-- **[Technical Implementation](doc_md/HNSW_Hybrid_Technical_Implementation.md)**: Implementation details
-- **[Complete Guide](doc_md/HNSW_HYBRID_README.md)**: Comprehensive user guide
-- **[Project Summary](doc_md/PROJECT_SUMMARY.md)**: Complete project overview
+Core docs located in `docs/` (Chinese & English mixed):
+- `HNSW_Hybrid_Algorithm_Principles.md`
+- `HNSW_Hybrid_Technical_Implementation.md`
+
+Method 3 (K-Means + HNSW) details in `method3/README.md`.
 
 ## 🎯 Use Cases
 
@@ -217,4 +172,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-Built on the foundation of the original HNSW algorithm with innovative hybrid architecture enhancements and MiniBatchKMeans integration for improved recall and construction efficiency.
+Built on the original HNSW algorithm with hybrid parenting strategies and MiniBatchKMeans integration for flexible two-stage recall optimization.

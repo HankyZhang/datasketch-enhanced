@@ -689,10 +689,6 @@ if __name__ == "__main__":
                         help='每个子节点的最大分配数 (启用多样化) (Max assignments per child - enable diversification)')
     parser.add_argument('--repair-min-assignments', type=int, default=None, 
                         help='构建修复期间每个子节点的最小分配数 (需要多样化) (Min assignments per child during build repair)')
-    parser.add_argument('--manual-repair', action='store_true', 
-                        help='在最优构建后运行手动修复 (Run manual repair after optimal build)')
-    parser.add_argument('--manual-repair-min', type=int, default=None, 
-                        help='手动修复的最小分配数 (Min assignments for manual repair)')
     parser.add_argument('--hybrid-parent-level', type=int, default=2,
                         help='Hybrid HNSW 父节点层级 (默认:2) (Parent level for level-based Hybrid HNSW)')
     parser.add_argument('--no-hybrid', action='store_true',
@@ -792,7 +788,6 @@ if __name__ == "__main__":
         demo_result = sweep_results[0]
         demo_params = demo_result['parameters']
         print(f"\nUsing first parameter combination for demonstration: {demo_params}")
-        
         print("\n🎯 Parameter sweep completed! All comparisons are available in sweep_results.")
 
         # Save results
@@ -806,8 +801,7 @@ if __name__ == "__main__":
                 'k_children_max': args.k_children_max,
                 'diversify_max_assignments': args.diversify_max_assignments,
                 'repair_min_assignments': args.repair_min_assignments,
-                'manual_repair': args.manual_repair,
-                'manual_repair_min': args.manual_repair_min
+                # manual repair parameters removed
             },
             'evaluation_info': {
                 'dataset_size': len(base_vectors),
@@ -816,7 +810,6 @@ if __name__ == "__main__":
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
         }
-        
         save_results(results, 'method3_tuning_results.json')
         
     print("\nParameter tuning completed!")
