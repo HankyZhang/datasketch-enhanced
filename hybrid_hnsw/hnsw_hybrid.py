@@ -43,7 +43,12 @@ class HNSWHybrid:
         diversify_max_assignments: Optional[int] = None,
         repair_min_assignments: Optional[int] = None,
         include_parents_in_results: bool = False,
-        overlap_sample: int = 50
+        overlap_sample: int = 50,
+        # Adaptive k_children parameters (similar to KMeansHNSW)
+        adaptive_k_children: bool = False,
+        k_children_scale: float = 1.5,
+        k_children_min: int = 100,
+        k_children_max: Optional[int] = None
     ):
         """
         Initialize the hybrid HNSW index.
@@ -55,11 +60,21 @@ class HNSWHybrid:
             distance_func: Distance function (uses base index's if None)
             approx_ef: Search width for approximate neighbor finding. If None, 
                       auto-computed based on dataset size and k_children
+            adaptive_k_children: Whether to adaptively adjust k_children based on parent count
+            k_children_scale: Scale factor for adaptive k_children
+            k_children_min: Minimum k_children when adaptive
+            k_children_max: Maximum k_children when adaptive (None = no limit)
         """
         self.base_index = base_index
         self.parent_level = parent_level
         self.k_children = k_children
         self.distance_func = distance_func or base_index._distance_func
+        
+        # Adaptive k_children configuration
+        self.adaptive_k_children = adaptive_k_children
+        self.k_children_scale = k_children_scale
+        self.k_children_min = k_children_min
+        self.k_children_max = k_children_max
 
         # Auto-compute approx_ef if not provided
         if approx_ef is None:
@@ -122,6 +137,21 @@ class HNSWHybrid:
         self.stats['parent_extraction_time'] = time.time() - t0
         print(f"Found {len(parent_nodes)} parent nodes at level {self.parent_level}")
 
+        # Adaptive k_children adjustment (after extracting parents so we know count)
+        if self.adaptive_k_children:
+            dataset_size = len(self.base_index)
+            num_parents = len(parent_nodes)
+            if num_parents > 0:
+                avg_children_per_parent = dataset_size / num_parents
+                adaptive_value = int(avg_children_per_parent * self.k_children_scale)
+                adaptive_value = max(self.k_children_min, adaptive_value)
+                if self.k_children_max is not None:
+                    adaptive_value = min(self.k_children_max, adaptive_value)
+                if adaptive_value != self.k_children:
+                    print(f"Adaptive k_children adjustment: {self.k_children} -> {adaptive_value} "
+                          f"(avg_children_per_parent={avg_children_per_parent:.1f}, scale={self.k_children_scale})")
+                    self.k_children = adaptive_value
+
         # Step 2: Precompute child mappings for each parent (with method options)
         t1 = time.time()
         self._precompute_child_mappings(parent_nodes)
@@ -138,6 +168,8 @@ class HNSWHybrid:
             if self.stats['num_parents'] > 0 else 0.0
         )
         self.stats['construction_time'] = time.time() - start_time
+        self.stats['adaptive_k_children'] = self.adaptive_k_children
+        self.stats['k_children'] = self.k_children
         
         print(f"Hybrid structure built in {self.stats['construction_time']:.2f}s")
         print(f"Statistics: {self.stats['num_parents']} parents, "

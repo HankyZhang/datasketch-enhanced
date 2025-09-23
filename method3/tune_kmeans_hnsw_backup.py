@@ -29,8 +29,6 @@ from itertools import product
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from method3.kmeans_hnsw import KMeansHNSW
 from hnsw.hnsw import HNSW
-# 引入 Hybrid HNSW 结构用于对比评估 (Import Hybrid HNSW for comparative evaluation)
-from hybrid_hnsw.hnsw_hybrid import HNSWHybrid
 # 使用sklearn MiniBatchKMeans作为纯k-means基线 (Switch to sklearn MiniBatchKMeans for pure k-means baseline)
 from sklearn.cluster import MiniBatchKMeans
 
@@ -269,44 +267,6 @@ class KMeansHNSWEvaluator:
             'std_individual_recall': float(np.std(individual_recalls))
         }
 
-    def evaluate_hybrid_hnsw(
-        self,
-        hybrid_index: 'HNSWHybrid',
-        k: int,
-        n_probe: int,
-        ground_truth: Dict
-    ) -> Dict[str, Any]:
-        """Evaluate recall for level-based Hybrid HNSW (parents from HNSW levels)."""
-        query_times = []
-        total_correct = 0
-        total_expected = len(self.query_set) * k
-        individual_recalls = []
-
-        for query_vector, query_id in zip(self.query_set, self.query_ids):
-            true_neighbors = {node_id for _, node_id in ground_truth[query_id]}
-            t0 = time.time()
-            results = hybrid_index.search(query_vector, k=k, n_probe=n_probe)
-            dt = time.time() - t0
-            query_times.append(dt)
-            found = {nid for nid, _ in results}
-            correct = len(true_neighbors & found)
-            total_correct += correct
-            individual_recalls.append(correct / k if k > 0 else 0.0)
-
-        return {
-            'phase': 'hybrid_hnsw_level',
-            'n_probe': n_probe,
-            'recall_at_k': total_correct / total_expected if total_expected else 0.0,
-            'avg_query_time_ms': float(np.mean(query_times) * 1000),
-            'std_query_time_ms': float(np.std(query_times) * 1000),
-            'total_correct': total_correct,
-            'total_expected': total_expected,
-            'individual_recalls': individual_recalls,
-            'avg_individual_recall': float(np.mean(individual_recalls)),
-            'std_individual_recall': float(np.std(individual_recalls)),
-            'hybrid_stats': hybrid_index.get_stats()
-        }
-
 
     def parameter_sweep(
         self,
@@ -318,10 +278,21 @@ class KMeansHNSWEvaluator:
     ) -> List[Dict[str, Any]]:
         """
         执行全面的参数扫描优化 (Perform comprehensive parameter sweep for optimization)
-
+        
         通过系统性地测试不同参数组合，找到最优的K-Means HNSW配置。
-        包括基线HNSW、纯K-Means、原KMeans-HNSW混合，以及 level-based Hybrid HNSW 的对比评估。
+        包括基线HNSW、纯K-Means和K-Means HNSW的对比评估。
+        
+        Args:
+            base_index: 使用的基础HNSW索引 (Base HNSW index to use)
+            param_grid: 参数及其测试值的字典 (Dictionary of parameters and their values to test)
+            evaluation_params: 评估参数 (Parameters for evaluation) - k值, n_probe值等
+            max_combinations: 最大测试组合数 (Maximum number of combinations to test)
+            adaptive_config: 自适应配置参数 (Adaptive configuration parameters, optional)
+            
+        Returns:
+            每个参数组合的评估结果列表 (List of evaluation results for each parameter combination)
         """
+        # 设置默认的自适应配置 (Set default adaptive configuration)
         if adaptive_config is None:
             adaptive_config = {
                 'adaptive_k_children': False,
@@ -331,36 +302,42 @@ class KMeansHNSWEvaluator:
                 'diversify_max_assignments': None,
                 'repair_min_assignments': None
             }
-
+        
         print("开始K-Means HNSW参数扫描... (Starting parameter sweep for K-Means HNSW)")
-
+        
+        # 生成所有参数组合 (Generate all parameter combinations)
         param_names = list(param_grid.keys())
         param_values = list(param_grid.values())
         combinations = list(product(*param_values))
+        
         if max_combinations and len(combinations) > max_combinations:
             print(f"限制测试 {max_combinations} 个组合，总共 {len(combinations)} 个 (Limiting to {max_combinations} combinations out of {len(combinations)})")
             combinations = random.sample(combinations, max_combinations)
+        
         print(f"测试 {len(combinations)} 个参数组合... (Testing {len(combinations)} parameter combinations)")
-
-        results: List[Dict[str, Any]] = []
+        
+        results = []
         k_values = evaluation_params.get('k_values', [10])
         n_probe_values = evaluation_params.get('n_probe_values', [5, 10, 20])
-        hybrid_parent_level = evaluation_params.get('hybrid_parent_level', 2)
-        enable_hybrid = evaluation_params.get('enable_hybrid', True)
-
-        # Precompute ground truths
-        ground_truths: Dict[int, Dict] = {}
+        
+        # 预计算所有k值的真实值 (Precompute ground truth for all k values)
+        ground_truths = {}
         for k in k_values:
+            # 查询向量默认并非直接源自 base_index 相同 id 的向量，因此不排除同 id
             ground_truths[k] = self.compute_ground_truth(k, exclude_query_ids=False)
 
         for i, combination in enumerate(combinations):
             print(f"\n--- Combination {i + 1}/{len(combinations)} ---")
+
+            # Create parameter dictionary
             params = dict(zip(param_names, combination))
             print(f"Parameters: {params}")
 
             try:
-                phase_records: List[Dict[str, Any]] = []
-                # Build KMeans-HNSW system
+                phase_records = []
+                
+                # Phase 2: 构建完整的K-Means HNSW系统 (Build full K-Means HNSW system)
+                # 先构建系统以获取实际使用的参数
                 construction_start = time.time()
                 kmeans_hnsw = KMeansHNSW(
                     base_index=base_index,
@@ -374,9 +351,12 @@ class KMeansHNSWEvaluator:
                 )
                 construction_time = time.time() - construction_start
                 print(f"  构建K-Means HNSW系统耗时 {construction_time:.2f}秒 (Built KMeansHNSW system in {construction_time:.2f}s)")
+                
+                # 从构建的系统中提取实际使用的参数以确保一致性
                 actual_n_clusters = kmeans_hnsw.n_clusters
 
-                # Baseline HNSW
+                
+                # Phase 1: 基线HNSW评估 - 使用base_index的ef_construction参数
                 base_ef = base_index._ef_construction
                 print(f"  使用base_index的ef_construction参数: {base_ef}")
                 for k in k_values:
@@ -384,83 +364,44 @@ class KMeansHNSWEvaluator:
                     phase_records.append({**b_eval, 'k': k})
                     print(f"  [基线HNSW/Baseline HNSW] k={k} ef={base_ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
 
-                # Pure KMeans (reuse clustering)
+                # Phase 3: K-Means聚类单独评估 - 使用与KMeansHNSW相同的聚类参数和n_probe值
                 print(f"  使用与KMeansHNSW相同的聚类参数: n_clusters={actual_n_clusters}")
                 for k in k_values:
                     for n_probe in n_probe_values:
                         c_eval = self._evaluate_pure_kmeans_from_existing(
-                            kmeans_hnsw,
+                            kmeans_hnsw,  # 直接传递KMeansHNSW对象
                             k,
                             ground_truths[k],
                             n_probe=n_probe
                         )
+                        # 添加phase标识以便与其他阶段区分
                         c_eval['phase'] = 'clusters_only'
                         phase_records.append({**c_eval, 'k': k})
                         print(f"  [仅K-Means聚类/Clusters Only] k={k} n_probe={n_probe} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
 
-                # Level-based Hybrid HNSW
-                if enable_hybrid:
-                    print(f"  构建并评估Hybrid HNSW (parent_level={hybrid_parent_level}, k_children={params['k_children']})")
-                    print(f"    注意：启用自适应配置以确保与KMeansHNSW公平比较")
-                    print(f"    Note: Enabling adaptive config for fair comparison with KMeansHNSW")
-                    try:
-                        hybrid_build_start = time.time()
-                        hybrid_index = HNSWHybrid(
-                            base_index=base_index,
-                            parent_level=hybrid_parent_level,
-                            k_children=params['k_children'],
-                            approx_ef=params.get('child_search_ef'),  # This maps to HybridHNSW's approx_ef
-                            parent_child_method='approx',
-                            diversify_max_assignments=adaptive_config.get('diversify_max_assignments'),
-                            repair_min_assignments=adaptive_config.get('repair_min_assignments'),
-                            # 使用与KMeansHNSW相同的自适应配置
-                            adaptive_k_children=adaptive_config.get('adaptive_k_children', False),
-                            k_children_scale=adaptive_config.get('k_children_scale', 1.5),
-                            k_children_min=adaptive_config.get('k_children_min', 100),
-                            k_children_max=adaptive_config.get('k_children_max')
-                        )
-                        hybrid_build_time = time.time() - hybrid_build_start
-                        hybrid_stats = hybrid_index.get_stats()
-                        print(f"    Hybrid构建统计: {hybrid_stats.get('num_parents', 0)} parents, "
-                              f"{hybrid_stats.get('num_children', 0)} children, "
-                              f"coverage: {hybrid_stats.get('coverage_fraction', 0):.4f}")
-                        print(f"    实际k_children: {hybrid_stats.get('k_children', 'N/A')}, "
-                              f"实际approx_ef: {hybrid_stats.get('approx_ef', 'N/A')}")
-                        if adaptive_config.get('adaptive_k_children', False):
-                            print(f"    自适应k_children已启用 (scale={adaptive_config.get('k_children_scale', 1.5)})")
-                        
-                        for k in k_values:
-                            for n_probe in n_probe_values:
-                                h_eval = self.evaluate_hybrid_hnsw(hybrid_index, k, n_probe, ground_truths[k])
-                                h_eval['hybrid_build_time'] = hybrid_build_time
-                                h_eval['hybrid_k_children'] = hybrid_stats.get('k_children', params['k_children'])  # Record actual value used
-                                phase_records.append({**h_eval, 'k': k})
-                                print(f"  [Hybrid(Level)] k={k} n_probe={n_probe} recall={h_eval['recall_at_k']:.4f} avg_time={h_eval['avg_query_time_ms']:.2f}ms")
-                    except Exception as he:
-                        print(f"  ⚠️ Hybrid HNSW 构建或评估失败: {he}")
-                        print(f"    详细错误信息: {type(he).__name__}: {he}")
-                        import traceback
-                        traceback.print_exc()
-
-                # Full KMeans-HNSW hybrid
+                # Phase 4: K-Means HNSW混合系统完整评估 (Full K-Means HNSW hybrid system evaluation)
                 for k in k_values:
                     for n_probe in n_probe_values:
                         eval_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truths[k])
                         phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_hybrid'})
                         print(f"  [K-Means HNSW混合/Hybrid] k={k} n_probe={n_probe} recall={eval_result['recall_at_k']:.4f} avg_time={eval_result['avg_query_time_ms']:.2f}ms")
 
+                # 收集此参数组合的所有评估结果 (Collect all evaluation results for this parameter combination)
                 combination_results = {
                     'parameters': params,
                     'construction_time': construction_time,
                     'phase_evaluations': phase_records
                 }
                 results.append(combination_results)
+                
+                # 显示此组合的最佳召回率 (Show best recall for this combination)
                 best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
                 print(f"  此组合最佳召回率 (Best recall): {best_recall:.4f}")
+                
             except Exception as e:
                 print(f"❌ 参数组合 {params} 出错: {e} (Error with combination)")
                 continue
-
+        
         print(f"\n🎯 参数扫描完成！测试了 {len(results)} 个组合 (Parameter sweep completed. Tested {len(results)} combinations)")
         return results
     
@@ -671,10 +612,6 @@ if __name__ == "__main__":
                         help='在最优构建后运行手动修复 (Run manual repair after optimal build)')
     parser.add_argument('--manual-repair-min', type=int, default=None, 
                         help='手动修复的最小分配数 (Min assignments for manual repair)')
-    parser.add_argument('--hybrid-parent-level', type=int, default=2,
-                        help='Hybrid HNSW 父节点层级 (默认:2) (Parent level for level-based Hybrid HNSW)')
-    parser.add_argument('--no-hybrid', action='store_true',
-                        help='禁用Hybrid HNSW评估 (Disable Hybrid HNSW evaluation)')
     args = parser.parse_args()
 
     print("🔬 K-Means HNSW参数调优和评估系统 (K-Means HNSW Parameter Tuning and Evaluation)")
@@ -736,9 +673,7 @@ if __name__ == "__main__":
     
     evaluation_params = {
         'k_values': [10],
-    'n_probe_values': [5, 10, 20],
-    'hybrid_parent_level': args.hybrid_parent_level,
-    'enable_hybrid': (not args.no_hybrid)
+        'n_probe_values': [5, 10, 20]
     }
     
     # Perform parameter sweep
