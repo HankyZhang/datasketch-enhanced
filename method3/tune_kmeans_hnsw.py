@@ -79,27 +79,34 @@ class KMeansHNSWEvaluator:
         通过对每个查询向量计算与所有数据向量的距离，找出真正的k个最近邻。
         这是评估其他算法召回率的标准基准。
         
+        注意：在当前实现中，查询向量和数据集向量是独立生成的，因此
+        exclude_query_ids 参数通常应设为 False，除非查询向量是从数据集中采样的。
+        
         Args:
             k: 最近邻数量 (Number of nearest neighbors)
             exclude_query_ids: 是否从结果中排除查询ID (Whether to exclude query IDs from results)
+                              仅当查询向量是数据集子集时才有意义 (Only meaningful when queries are subset of dataset)
             
         Returns:
-            字典：查询ID -> (邻居ID, 距离)元组列表 (Dictionary mapping query_id to list of (neighbor_id, distance) tuples)
+            字典：查询ID -> (距离, 数据索引)元组列表 (Dictionary mapping query_id to list of (distance, data_index) tuples)
         """
         cache_key = (k, exclude_query_ids)
         if cache_key in self._ground_truth_cache:
             return self._ground_truth_cache[cache_key]
         
-        print(f"正在计算 {len(self.query_set)} 个查询的真实值 (k={k})... (Computing ground truth for {len(self.query_set)} queries)")
+        print(f"正在计算 {len(self.query_set)} 个查询的真实值 (k={k}, exclude_query_ids={exclude_query_ids})...")
+        print(f"Computing ground truth for {len(self.query_set)} queries against {len(self.dataset)} data points")
         start_time = time.time()
         
         ground_truth = {}
+        excluded_count = 0
         
         for i, (query_vector, query_id) in enumerate(zip(self.query_set, self.query_ids)):
             distances = []
             
             for j, data_vector in enumerate(self.dataset):
                 if exclude_query_ids and j == query_id:
+                    excluded_count += 1
                     continue  # 跳过查询本身 (Skip the query itself)
                 
                 distance = self.distance_func(query_vector, data_vector)
@@ -113,7 +120,12 @@ class KMeansHNSWEvaluator:
                 print(f"  已处理 {i + 1}/{len(self.query_set)} 个查询 (Processed {i + 1}/{len(self.query_set)} queries)")
         
         elapsed = time.time() - start_time
-        print(f"真实值计算完成，耗时 {elapsed:.2f}秒 (Ground truth computed in {elapsed:.2f}s)")
+        if exclude_query_ids and excluded_count == 0:
+            print(f"⚠️  警告：exclude_query_ids=True但没有排除任何数据点。查询向量可能不在数据集中。")
+            print(f"   Warning: exclude_query_ids=True but no data points were excluded. Query vectors may not be in dataset.")
+        
+        print(f"真实值计算完成，耗时 {elapsed:.2f}秒，排除了 {excluded_count} 个数据点")
+        print(f"Ground truth computed in {elapsed:.2f}s, excluded {excluded_count} data points")
         
         self._ground_truth_cache[cache_key] = ground_truth
         return ground_truth
@@ -210,21 +222,49 @@ class KMeansHNSWEvaluator:
         query_times = []
         total_correct = 0
         total_expected = len(self.query_set) * k
+        individual_recalls = []
+        
+        print(f"🔍 评估HNSW基线性能 (k={k}, ef={ef})...")
+        
         for query_vector, query_id in zip(self.query_set, self.query_ids):
-            true_neighbors = {nid for _, nid in ground_truth[query_id]}
+            # Ground truth format: {query_id: [(distance, node_id), ...]}
+            # Extract the node_ids (which are data indices) from ground truth
+            true_neighbors = {node_id for _, node_id in ground_truth[query_id]}
+            
             t0 = time.time()
             results = base_index.query(query_vector, k=k, ef=ef)
             dt = time.time() - t0
             query_times.append(dt)
+            
+            # HNSW query returns [(node_id, distance), ...]
             found = {nid for nid, _ in results}
-            total_correct += len(true_neighbors & found)
+            correct = len(true_neighbors & found)
+            total_correct += correct
+            
+            # Individual recall for this query
+            individual_recall = correct / k if k > 0 else 0.0
+            individual_recalls.append(individual_recall)
+            
+            # Debug info for first few queries
+            if query_id < 3:
+                print(f"  Query {query_id}: found {len(found)} results, {correct}/{k} correct, recall={individual_recall:.4f}")
+                print(f"    True neighbors (first 5): {list(true_neighbors)[:5]}")
+                print(f"    Found neighbors (first 5): {list(found)[:5]}")
+        
+        avg_recall = np.mean(individual_recalls)
+        print(f"  HNSW基线召回率: {avg_recall:.4f} (总计 {total_correct}/{total_expected})")
+        
         return {
             'phase': 'baseline_hnsw',
             'ef': ef,
             'recall_at_k': total_correct / total_expected if total_expected else 0.0,
             'avg_query_time_ms': float(np.mean(query_times) * 1000),
+            'std_query_time_ms': float(np.std(query_times) * 1000),
             'total_correct': total_correct,
-            'total_expected': total_expected
+            'total_expected': total_expected,
+            'individual_recalls': individual_recalls,
+            'avg_individual_recall': float(np.mean(individual_recalls)),
+            'std_individual_recall': float(np.std(individual_recalls))
         }
 
 
