@@ -42,9 +42,6 @@ class KMeansHNSWEvaluator:
     - 召回率评估
     - 参数扫描和优化
     - 与基线方法的性能对比
-    
-    兼容方法1和方法2的现有评估框架。
-    Compatible with existing evaluation frameworks from Methods 1 & 2.
     """
     
     def __init__(
@@ -235,44 +232,79 @@ class KMeansHNSWEvaluator:
         kmeans_model: Any,
         dataset: np.ndarray,
         k: int,
-        ground_truth: Dict
+        ground_truth: Dict,
+        base_index: Optional[HNSW] = None
     ) -> Dict[str, Any]:
-        """Evaluate recall using ONLY KMeans clusters (Phase 2) without child mapping.
-        Strategy: For each query pick nearest centroid, restrict to its members, pick top-k by L2.
+        """
+        评估仅使用K-Means聚类的搜索性能 (Evaluate recall using ONLY KMeans clusters)
+        
+        策略：对每个查询找到最近的聚类中心，在该聚类的成员中按L2距离选择top-k
+        
+        Args:
+            kmeans_model: 已训练的K-Means模型
+            dataset: 聚类时使用的数据集
+            k: 返回的近邻数量
+            ground_truth: 真实值
+            base_index: 基础HNSW索引，用于获取原始ID映射
         """
         if not hasattr(kmeans_model, 'cluster_centers_') or not hasattr(kmeans_model, 'labels_'):
             raise ValueError("KMeans model must be fitted with cluster_centers_ and labels_ available")
+        
         centers = kmeans_model.cluster_centers_
         labels = kmeans_model.labels_
         n_clusters = centers.shape[0]
-        # Build inverse index: cluster -> indices
+        
+        # 构建聚类到索引的逆向映射 (Build inverse index: cluster -> indices)
         clusters = [[] for _ in range(n_clusters)]
-        for idx, c in enumerate(labels):
-            clusters[c].append(idx)
+        
+        # 如果提供了base_index，建立dataset索引到原始ID的映射
+        if base_index is not None:
+            dataset_idx_to_original_id = list(base_index.keys())
+            for dataset_idx, cluster_id in enumerate(labels):
+                original_id = dataset_idx_to_original_id[dataset_idx]
+                clusters[cluster_id].append((dataset_idx, original_id))
+        else:
+            # 假设dataset索引就是原始ID
+            for dataset_idx, cluster_id in enumerate(labels):
+                clusters[cluster_id].append((dataset_idx, dataset_idx))
+        
         query_times = []
         total_correct = 0
         total_expected = len(self.query_set) * k
         individual_recalls = []
+        
         for qvec, qid in zip(self.query_set, self.query_ids):
             t0 = time.time()
+            
+            # 找到最近的聚类中心
             d2c = np.linalg.norm(centers - qvec, axis=1)
             cidx = int(np.argmin(d2c))
-            member_ids = clusters[cidx]
-            if member_ids:
-                member_vecs = dataset[member_ids]
-                dists = np.linalg.norm(member_vecs - qvec, axis=1)
-                # exclude identical id if present
-                pairs = [(float(dist), int(mid)) for dist, mid in zip(dists, member_ids) if mid != qid]
-                pairs.sort(key=lambda x: x[0])
-                results = pairs[:k]
-                found = {mid for _, mid in results}
+            cluster_members = clusters[cidx]
+            
+            if cluster_members:
+                # 计算查询向量到聚类成员的距离
+                distances_with_ids = []
+                for dataset_idx, original_id in cluster_members:
+                    if original_id != qid:  # 排除查询本身
+                        member_vec = dataset[dataset_idx]
+                        dist = np.linalg.norm(member_vec - qvec)
+                        distances_with_ids.append((dist, original_id))
+                
+                # 按距离排序并取top-k
+                distances_with_ids.sort(key=lambda x: x[0])
+                results = distances_with_ids[:k]
+                found = {original_id for _, original_id in results}
             else:
                 found = set()
+            
             query_times.append(time.time() - t0)
+            
+            # 计算召回率
             true_neighbors = {nid for _, nid in ground_truth[qid]}
             correct = len(true_neighbors & found)
             total_correct += correct
             individual_recalls.append(correct / k if k else 0.0)
+        
         overall = total_correct / total_expected if total_expected else 0.0
         return {
             'phase': 'clusters_only',
@@ -290,7 +322,8 @@ class KMeansHNSWEvaluator:
         base_index: HNSW,
         param_grid: Dict[str, List[Any]],
         evaluation_params: Dict[str, Any],
-        max_combinations: Optional[int] = None
+        max_combinations: Optional[int] = None,
+        adaptive_config: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
         执行全面的参数扫描优化 (Perform comprehensive parameter sweep for optimization)
@@ -303,10 +336,22 @@ class KMeansHNSWEvaluator:
             param_grid: 参数及其测试值的字典 (Dictionary of parameters and their values to test)
             evaluation_params: 评估参数 (Parameters for evaluation) - k值, n_probe值等
             max_combinations: 最大测试组合数 (Maximum number of combinations to test)
+            adaptive_config: 自适应配置参数 (Adaptive configuration parameters, optional)
             
         Returns:
             每个参数组合的评估结果列表 (List of evaluation results for each parameter combination)
         """
+        # 设置默认的自适应配置 (Set default adaptive configuration)
+        if adaptive_config is None:
+            adaptive_config = {
+                'adaptive_k_children': False,
+                'k_children_scale': 1.5,
+                'k_children_min': 100,
+                'k_children_max': None,
+                'diversify_max_assignments': None,
+                'repair_min_assignments': None
+            }
+        
         print("开始K-Means HNSW参数扫描... (Starting parameter sweep for K-Means HNSW)")
         
         # 生成所有参数组合 (Generate all parameter combinations)
@@ -338,76 +383,72 @@ class KMeansHNSWEvaluator:
 
             try:
                 phase_records = []
-                # Phase 1: baseline HNSW recall (optional multiple ef values)
-                baseline_ef_values = evaluation_params.get('baseline_ef_values', [evaluation_params.get('baseline_ef', 100)])
-                for k in k_values:
-                    for ef in baseline_ef_values:
-                        b_eval = self.evaluate_hnsw_baseline(base_index, k, ef, ground_truths[k])
-                        phase_records.append({**b_eval, 'k': k})
-                        print(f"  [Baseline HNSW] k={k} ef={ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
-
-                # Pure KMeans baseline using same n_clusters; evaluate over same n_probe set for fairness
-                if 'n_clusters' in params:
-                    for k in k_values:
-                        for n_probe in n_probe_values:
-                            pure_eval = self._evaluate_pure_kmeans(
-                                k,
-                                ground_truths[k],
-                                n_clusters=params['n_clusters'],
-                                n_probe=n_probe
-                            )
-                            phase_records.append({**pure_eval, 'phase': 'pure_kmeans_for_combo'})
-                            print(
-                                f"  [Pure KMeans] k={k} n_clusters={params['n_clusters']} n_probe={n_probe} "
-                                f"recall={pure_eval['recall_at_k']:.4f} avg_time={pure_eval['avg_query_time_ms']:.2f}ms"
-                            )
-
-                # Build full system (includes clustering + child mapping)
+                
+                # Phase 2: 构建完整的K-Means HNSW系统 (Build full K-Means HNSW system)
+                # 先构建系统以获取实际使用的参数
                 construction_start = time.time()
                 kmeans_hnsw = KMeansHNSW(
                     base_index=base_index,
                     **params,
-                    adaptive_k_children=getattr(args, 'adaptive_k_children', False),
-                    k_children_scale=getattr(args, 'k_children_scale', 1.5),
-                    k_children_min=getattr(args, 'k_children_min', 100),
-                    k_children_max=getattr(args, 'k_children_max', None),
-                    diversify_max_assignments=getattr(args, 'diversify_max_assignments', None),
-                    repair_min_assignments=getattr(args, 'repair_min_assignments', None)
+                    adaptive_k_children=adaptive_config['adaptive_k_children'],
+                    k_children_scale=adaptive_config['k_children_scale'],
+                    k_children_min=adaptive_config['k_children_min'],
+                    k_children_max=adaptive_config['k_children_max'],
+                    diversify_max_assignments=adaptive_config['diversify_max_assignments'],
+                    repair_min_assignments=adaptive_config['repair_min_assignments']
                 )
                 construction_time = time.time() - construction_start
-                print(f"  Built KMeansHNSW system in {construction_time:.2f}s")
+                print(f"  构建K-Means HNSW系统耗时 {construction_time:.2f}秒 (Built KMeansHNSW system in {construction_time:.2f}s)")
+                
+                # 从构建的系统中提取实际使用的参数以确保一致性
+                actual_n_clusters = kmeans_hnsw.n_clusters
+                actual_child_search_ef = kmeans_hnsw.child_search_ef
+                
+                # Phase 1: 基线HNSW评估 - 使用与KMeansHNSW第一阶段相同的ef参数
+                print(f"  使用与KMeansHNSW第一阶段相同的ef参数: {actual_child_search_ef}")
+                for k in k_values:
+                    b_eval = self.evaluate_hnsw_baseline(base_index, k, actual_child_search_ef, ground_truths[k])
+                    phase_records.append({**b_eval, 'k': k})
+                    print(f"  [基线HNSW/Baseline HNSW] k={k} ef={actual_child_search_ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
 
-                # Phase 2: clusters-only recall using fitted internal KMeans model
+                # Phase 3: K-Means聚类单独评估 - 使用与KMeansHNSW相同的聚类参数
+                print(f"  使用与KMeansHNSW相同的聚类参数: n_clusters={actual_n_clusters}")
+                kmeans_dataset = kmeans_hnsw._extract_dataset_vectors()
                 for k in k_values:
                     c_eval = self.evaluate_clusters_only(
                         kmeans_hnsw.kmeans_model,
-                        kmeans_hnsw._extract_dataset_vectors(),  # reuse extractor
+                        kmeans_dataset,  # 使用与聚类时相同的数据集
                         k,
-                        ground_truths[k]
+                        ground_truths[k],
+                        kmeans_hnsw.base_index  # 传递base_index以获取正确的索引映射
                     )
                     phase_records.append({**c_eval, 'k': k})
-                    print(f"  [Clusters Only] k={k} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
+                    print(f"  [仅K-Means聚类/Clusters Only] k={k} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
 
-                # Phase 3: full two-stage search evaluations over n_probe
+                # Phase 4: K-Means HNSW混合系统完整评估 (Full K-Means HNSW hybrid system evaluation)
                 for k in k_values:
                     for n_probe in n_probe_values:
                         eval_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truths[k])
-                        phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_two_stage'})
-                        print(f"  [Two-Stage] k={k} n_probe={n_probe} recall={eval_result['recall_at_k']:.4f} avg_time={eval_result['avg_query_time_ms']:.2f}ms")
+                        phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_hybrid'})
+                        print(f"  [K-Means HNSW混合/Hybrid] k={k} n_probe={n_probe} recall={eval_result['recall_at_k']:.4f} avg_time={eval_result['avg_query_time_ms']:.2f}ms")
 
+                # 收集此参数组合的所有评估结果 (Collect all evaluation results for this parameter combination)
                 combination_results = {
                     'parameters': params,
                     'construction_time': construction_time,
                     'phase_evaluations': phase_records
                 }
                 results.append(combination_results)
+                
+                # 显示此组合的最佳召回率 (Show best recall for this combination)
                 best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
-                print(f"Best recall (any phase) for this combination: {best_recall:.4f}")
+                print(f"  此组合最佳召回率 (Best recall): {best_recall:.4f}")
+                
             except Exception as e:
-                print(f"Error with combination {params}: {e}")
+                print(f"❌ 参数组合 {params} 出错: {e} (Error with combination)")
                 continue
         
-        print(f"\nParameter sweep completed. Tested {len(results)} combinations.")
+        print(f"\n🎯 参数扫描完成！测试了 {len(results)} 个组合 (Parameter sweep completed. Tested {len(results)} combinations)")
         return results
     
     def find_optimal_parameters(
@@ -483,145 +524,156 @@ class KMeansHNSWEvaluator:
     ) -> Dict[str, Any]:
         """Compare K-Means HNSW performance with baseline HNSW and pure K-means.
 
-        Pure K-means is evaluated probing the same number of centroids (n_probe)
-        to make the comparison fair.
+        确保参数一致性：
+        - HNSW基线使用与KMeansHNSW第一阶段相同的ef参数
+        - 纯K-Means使用与KMeansHNSW相同的聚类参数
         """
+        # 从KMeansHNSW系统获取实际使用的参数
+        actual_n_clusters = kmeans_hnsw.n_clusters
+        actual_child_search_ef = kmeans_hnsw.child_search_ef
+        
         if ef_values is None:
-            ef_values = [50, 100, 200, 400]
+            # 使用与KMeansHNSW第一阶段相同的ef参数，以及一些对比值
+            ef_values = [actual_child_search_ef, 50, 100, 200, 400]
+            # 去重并排序
+            ef_values = sorted(set(ef_values))
 
-        print("Comparing K-Means HNSW with baseline HNSW and pure K-means...")
+        print(f"Comparing K-Means HNSW with baseline HNSW and pure K-means...")
+        print(f"KMeansHNSW参数: n_clusters={actual_n_clusters}, child_search_ef={actual_child_search_ef}")
 
         ground_truth = self.compute_ground_truth(k)
 
         # K-Means HNSW two-stage
         kmeans_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truth)
 
-        # Pure k-means (multi-cluster probe)
-        print("Evaluating pure K-means clustering (matching n_probe)...")
-        kmeans_clustering_result = self._evaluate_pure_kmeans(k, ground_truth, n_probe=n_probe)
+        # Pure k-means - 直接使用KMeansHNSW内部的聚类结果，避免重复聚类
+        print(f"Evaluating pure K-means clustering using EXISTING KMeansHNSW clustering (n_clusters={actual_n_clusters}, n_probe={n_probe})...")
+        kmeans_clustering_result = self._evaluate_pure_kmeans_from_existing(
+            kmeans_hnsw,  # 直接传递KMeansHNSW对象
+            k, 
+            ground_truth,
+            n_probe=n_probe
+        )
 
-        # Baseline HNSW
+        # Baseline HNSW - 直接使用KMeansHNSW内部的base_index，避免重复查询
         baseline_results = []
         for ef in ef_values:
-            print(f"Evaluating baseline HNSW with ef={ef}...")
-            query_times: List[float] = []
-            total_correct = 0
-            total_expected = len(self.query_set) * k
-            for query_vector, query_id in zip(self.query_set, self.query_ids):
-                true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
-                t0 = time.time()
-                results = base_index.query(query_vector, k=k, ef=ef)
-                dt = time.time() - t0
-                query_times.append(dt)
-                found_neighbors = {nid for nid, _ in results}
-                total_correct += len(true_neighbors & found_neighbors)
+            print(f"Evaluating baseline HNSW with ef={ef}{'[SAME as KMeansHNSW]' if ef == actual_child_search_ef else ''}...")
+            # 使用现有的evaluate_hnsw_baseline方法避免代码重复
+            baseline_result = self.evaluate_hnsw_baseline(kmeans_hnsw.base_index, k, ef, ground_truth)
+            # 转换结果格式以匹配预期的输出格式
             baseline_results.append({
                 'method': 'baseline_hnsw',
                 'ef': ef,
-                'recall_at_k': total_correct / total_expected if total_expected else 0.0,
-                'avg_query_time_ms': float(np.mean(query_times) * 1000),
-                'total_correct': total_correct,
-                'total_expected': total_expected
+                'is_matching_kmeans_ef': (ef == actual_child_search_ef),
+                'recall_at_k': baseline_result['recall_at_k'],
+                'avg_query_time_ms': baseline_result['avg_query_time_ms'],
+                'total_correct': baseline_result['total_correct'],
+                'total_expected': baseline_result['total_expected']
             })
 
         return {
             'kmeans_hnsw': kmeans_result,
             'pure_kmeans': kmeans_clustering_result,
             'baseline_hnsw': baseline_results,
+            'parameter_consistency': {
+                'kmeans_n_clusters': actual_n_clusters,
+                'kmeans_child_search_ef': actual_child_search_ef,
+                'pure_kmeans_n_clusters': kmeans_clustering_result['n_clusters'],
+                'baseline_ef_matching_kmeans': actual_child_search_ef
+            },
             'comparison_summary': {
                 'kmeans_hnsw_recall': kmeans_result['recall_at_k'],
                 'kmeans_hnsw_time_ms': kmeans_result['avg_query_time_ms'],
                 'pure_kmeans_recall': kmeans_clustering_result['recall_at_k'],
                 'pure_kmeans_time_ms': kmeans_clustering_result['avg_query_time_ms'],
                 'best_baseline_recall': max(r['recall_at_k'] for r in baseline_results) if baseline_results else 0.0,
-                'best_baseline_time_ms': min(r['avg_query_time_ms'] for r in baseline_results) if baseline_results else 0.0
+                'best_baseline_time_ms': min(r['avg_query_time_ms'] for r in baseline_results) if baseline_results else 0.0,
+                'matching_ef_baseline_recall': next((r['recall_at_k'] for r in baseline_results if r['is_matching_kmeans_ef']), 0.0),
+                'matching_ef_baseline_time_ms': next((r['avg_query_time_ms'] for r in baseline_results if r['is_matching_kmeans_ef']), 0.0)
             }
         }
     
-    def _evaluate_pure_kmeans(self, k: int, ground_truth: Dict, n_clusters: Optional[int] = None, n_probe: int = 1) -> Dict[str, Any]:
-        """Evaluate pure MiniBatchKMeans clustering for comparison.
-        Uses centroids to pick the nearest n_probe clusters, then returns top-k points within their union.
-
-        Args:
-            k: recall@k evaluation size
-            ground_truth: dict mapping query id -> list of (dist, id)
-            n_clusters: if provided, force this number of clusters (aligning with current param combination)
-            n_probe: number of closest centroids to probe (>=1)
+    def _evaluate_pure_kmeans_from_existing(
+        self, 
+        kmeans_hnsw: KMeansHNSW, 
+        k: int, 
+        ground_truth: Dict, 
+        n_probe: int = 1
+    ) -> Dict[str, Any]:
         """
-        # Heuristic: choose number of clusters proportional to sqrt(N) if not specified, fallback to 10
-        n_samples = len(self.dataset)
-        if n_clusters is None:
-            suggested = int(np.sqrt(n_samples))
-            n_clusters = max(10, min(256, suggested))
-        if n_probe < 1:
-            n_probe = 1
-
-        print(f"Running MiniBatchKMeans clustering (n_clusters={n_clusters}, n_probe={n_probe}) for pure KMeans baseline...")
-
-        start_time = time.time()
-        kmeans = MiniBatchKMeans(
-            n_clusters=n_clusters,
-            random_state=42,
-            batch_size=min(1024, n_samples),
-            n_init=3,
-            max_iter=100,
-            verbose=0
-        )
-        kmeans.fit(self.dataset)
-        clustering_time = time.time() - start_time
-
+        使用KMeansHNSW内部已有的聚类结果评估纯K-Means性能
+        避免重复聚类，直接复用已训练的模型和数据映射
+        
+        Evaluate pure K-Means using existing clustering results from KMeansHNSW.
+        Avoids redundant clustering by reusing trained model and data mappings.
+        """
+        print(f"Reusing existing clustering from KMeansHNSW (n_clusters={kmeans_hnsw.n_clusters}, n_probe={n_probe})...")
+        
+        # 直接使用KMeansHNSW内部的聚类结果
+        kmeans_model = kmeans_hnsw.kmeans_model
+        centers = kmeans_model.cluster_centers_
+        n_clusters = centers.shape[0]
+        
+        # 获取与聚类时相同的数据集和索引映射
+        kmeans_dataset = kmeans_hnsw._extract_dataset_vectors()
+        labels = kmeans_model.labels_
+        
+        # 构建聚类到成员的映射 (与evaluate_clusters_only类似的逻辑)
+        clusters = [[] for _ in range(n_clusters)]
+        dataset_idx_to_original_id = list(kmeans_hnsw.base_index.keys())
+        
+        for dataset_idx, cluster_id in enumerate(labels):
+            original_id = dataset_idx_to_original_id[dataset_idx]
+            clusters[cluster_id].append((dataset_idx, original_id))
+        
         query_times = []
         total_correct = 0
         total_expected = len(self.query_set) * k
         individual_recalls = []
-
+        
         # Cap n_probe to number of clusters
         n_probe_eff = min(n_probe, n_clusters)
-
+        
         for query_vector, query_id in zip(self.query_set, self.query_ids):
             search_start = time.time()
-            # Vectorized distance to centroids
-            diffs = kmeans.cluster_centers_ - query_vector
+            
+            # 计算到聚类中心的距离
+            diffs = centers - query_vector
             distances_to_centroids = np.linalg.norm(diffs, axis=1)
-            # Get indices of n_probe closest centroids (unordered then sort for determinism)
+            
+            # 获取最近的n_probe个聚类中心
             probe_centroids = np.argpartition(distances_to_centroids, n_probe_eff - 1)[:n_probe_eff]
-            # Optionally sort by distance (small overhead, clearer behavior)
             probe_centroids = probe_centroids[np.argsort(distances_to_centroids[probe_centroids])]
-
-            # Collect member ids from all probed centroids
-            member_ids_list = [np.where(kmeans.labels_ == cid)[0] for cid in probe_centroids]
-            if member_ids_list:
-                union_points = np.concatenate(member_ids_list)
-                if union_points.size > 0:
-                    union_vecs = self.dataset[union_points]
-                    point_diffs = union_vecs - query_vector
-                    dists = np.linalg.norm(point_diffs, axis=1)
-                    # Exclude the query id if present
-                    filtered = [
-                        (dist, int(pid)) for dist, pid in zip(dists, union_points)
-                        if pid != query_id
-                    ]
-                    # Partial sort then full sort if small; we just sort because union typically modest
-                    filtered.sort(key=lambda x: x[0])
-                    results = filtered[:k]
-                    found_neighbors = {pid for _, pid in results}
-                else:
-                    found_neighbors = set()
-            else:
-                found_neighbors = set()
-
+            
+            # 收集所有被探测聚类的成员
+            all_candidates = []
+            for cluster_idx in probe_centroids:
+                cluster_members = clusters[cluster_idx]
+                for dataset_idx, original_id in cluster_members:
+                    if original_id != query_id:  # 排除查询本身
+                        member_vec = kmeans_dataset[dataset_idx]
+                        dist = np.linalg.norm(member_vec - query_vector)
+                        all_candidates.append((dist, original_id))
+            
+            # 按距离排序并取top-k
+            all_candidates.sort(key=lambda x: x[0])
+            results = all_candidates[:k]
+            found_neighbors = {original_id for _, original_id in results}
+            
             search_time = time.time() - search_start
             query_times.append(search_time)
-
+            
+            # 计算召回率
             true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
             correct = len(true_neighbors & found_neighbors)
             total_correct += correct
             individual_recalls.append(correct / k if k > 0 else 0.0)
-
+        
         overall_recall = total_correct / total_expected if total_expected > 0 else 0.0
-
+        
         return {
-            'method': 'pure_minibatch_kmeans',
+            'method': 'pure_kmeans_from_existing',
             'recall_at_k': overall_recall,
             'total_correct': total_correct,
             'total_expected': total_expected,
@@ -630,10 +682,11 @@ class KMeansHNSWEvaluator:
             'std_individual_recall': float(np.std(individual_recalls)),
             'avg_query_time_ms': float(np.mean(query_times) * 1000),
             'std_query_time_ms': float(np.std(query_times) * 1000),
-            'clustering_time': clustering_time,
+            'clustering_time': 0.0,  # 没有重新聚类，时间为0
             'n_clusters': n_clusters,
             'n_probe': n_probe_eff,
-            'k': k
+            'k': k,
+            'reused_existing_clustering': True
         }
 
 
@@ -815,11 +868,23 @@ if __name__ == "__main__":
     print("\nStarting parameter sweep...")
     # Limit combinations to keep runtime sane on large sets
     max_combos = 9 if len(cluster_options) > 1 else None
+    
+    # 准备自适应配置 (Prepare adaptive configuration)
+    adaptive_config = {
+        'adaptive_k_children': args.adaptive_k_children,
+        'k_children_scale': args.k_children_scale,
+        'k_children_min': args.k_children_min,
+        'k_children_max': args.k_children_max,
+        'diversify_max_assignments': args.diversify_max_assignments,
+        'repair_min_assignments': args.repair_min_assignments
+    }
+    
     sweep_results = evaluator.parameter_sweep(
         base_index,
         param_grid,
         evaluation_params,
-        max_combinations=max_combos
+        max_combinations=max_combos,
+        adaptive_config=adaptive_config
     )
     
     # Find optimal parameters
@@ -863,6 +928,19 @@ if __name__ == "__main__":
               f"Time={comparison['comparison_summary']['pure_kmeans_time_ms']:.2f}ms")
         print(f"Best Baseline: Recall={comparison['comparison_summary']['best_baseline_recall']:.4f}, "
               f"Time={comparison['comparison_summary']['best_baseline_time_ms']:.2f}ms")
+        
+        # 显示参数一致性信息
+        param_consistency = comparison['parameter_consistency']
+        print(f"\n📊 Parameter Consistency (参数一致性):")
+        print(f"  KMeansHNSW n_clusters: {param_consistency['kmeans_n_clusters']}")
+        print(f"  Pure K-Means n_clusters: {param_consistency['pure_kmeans_n_clusters']} {'✓' if param_consistency['kmeans_n_clusters'] == param_consistency['pure_kmeans_n_clusters'] else '✗'}")
+        print(f"  KMeansHNSW child_search_ef: {param_consistency['kmeans_child_search_ef']}")
+        print(f"  Baseline HNSW ef (matching): {param_consistency['baseline_ef_matching_kmeans']}")
+        
+        # 显示使用相同ef参数的HNSW基线性能
+        matching_ef_recall = comparison['comparison_summary']['matching_ef_baseline_recall']
+        matching_ef_time = comparison['comparison_summary']['matching_ef_baseline_time_ms']
+        print(f"  Baseline HNSW (same ef): Recall={matching_ef_recall:.4f}, Time={matching_ef_time:.2f}ms")
         
         # Additional detailed output for pure K-means
         pure_kmeans_result = comparison['pure_kmeans']
