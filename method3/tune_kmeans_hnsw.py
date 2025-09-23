@@ -429,6 +429,28 @@ class KMeansHNSWEvaluator:
                         if adaptive_config.get('adaptive_k_children', False):
                             print(f"    自适应k_children已启用 (scale={adaptive_config.get('k_children_scale', 1.5)})")
                         
+                        # 显示repair/diversify状态
+                        if adaptive_config.get('repair_min_assignments'):
+                            print(f"    ✅ Repair功能已启用 (min_assignments={adaptive_config.get('repair_min_assignments')})")
+                        else:
+                            print(f"    ⚠️ Repair功能未启用 (repair_min_assignments=None)")
+                            print(f"    💡 提示: 启用repair功能可确保coverage=1.0")
+                        
+                        if adaptive_config.get('diversify_max_assignments'):
+                            print(f"    ✅ Diversify功能已启用 (max_assignments={adaptive_config.get('diversify_max_assignments')})")
+                        else:
+                            print(f"    ⚠️ Diversify功能未启用 (diversify_max_assignments=None)")
+                        
+                        # 检查coverage和解释
+                        coverage = hybrid_stats.get('coverage_fraction', 0)
+                        if coverage < 1.0:
+                            print(f"    ⚠️ Coverage = {coverage:.3f} < 1.0")
+                            print(f"    💡 可能原因: parent数量({hybrid_stats.get('num_parents', 0)})不足 或 k_children({hybrid_stats.get('k_children', 'N/A')})太小")
+                            if not adaptive_config.get('repair_min_assignments'):
+                                print(f"    💡 建议: 启用repair功能 --repair-min-assignments 2")
+                        else:
+                            print(f"    ✅ Coverage = {coverage:.3f} (完全覆盖)")
+                        
                         for k in k_values:
                             for n_probe in n_probe_values:
                                 h_eval = self.evaluate_hybrid_hnsw(hybrid_index, k, n_probe, ground_truths[k])
