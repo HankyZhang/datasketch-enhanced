@@ -227,96 +227,7 @@ class KMeansHNSWEvaluator:
             'total_expected': total_expected
         }
 
-    def evaluate_clusters_only(
-        self,
-        kmeans_model: Any,
-        dataset: np.ndarray,
-        k: int,
-        ground_truth: Dict,
-        base_index: Optional[HNSW] = None
-    ) -> Dict[str, Any]:
-        """
-        评估仅使用K-Means聚类的搜索性能 (Evaluate recall using ONLY KMeans clusters)
-        
-        策略：对每个查询找到最近的聚类中心，在该聚类的成员中按L2距离选择top-k
-        
-        Args:
-            kmeans_model: 已训练的K-Means模型
-            dataset: 聚类时使用的数据集
-            k: 返回的近邻数量
-            ground_truth: 真实值
-            base_index: 基础HNSW索引，用于获取原始ID映射
-        """
-        if not hasattr(kmeans_model, 'cluster_centers_') or not hasattr(kmeans_model, 'labels_'):
-            raise ValueError("KMeans model must be fitted with cluster_centers_ and labels_ available")
-        
-        centers = kmeans_model.cluster_centers_
-        labels = kmeans_model.labels_
-        n_clusters = centers.shape[0]
-        
-        # 构建聚类到索引的逆向映射 (Build inverse index: cluster -> indices)
-        clusters = [[] for _ in range(n_clusters)]
-        
-        # 如果提供了base_index，建立dataset索引到原始ID的映射
-        if base_index is not None:
-            dataset_idx_to_original_id = list(base_index.keys())
-            for dataset_idx, cluster_id in enumerate(labels):
-                original_id = dataset_idx_to_original_id[dataset_idx]
-                clusters[cluster_id].append((dataset_idx, original_id))
-        else:
-            # 假设dataset索引就是原始ID
-            for dataset_idx, cluster_id in enumerate(labels):
-                clusters[cluster_id].append((dataset_idx, dataset_idx))
-        
-        query_times = []
-        total_correct = 0
-        total_expected = len(self.query_set) * k
-        individual_recalls = []
-        
-        for qvec, qid in zip(self.query_set, self.query_ids):
-            t0 = time.time()
-            
-            # 找到最近的聚类中心
-            d2c = np.linalg.norm(centers - qvec, axis=1)
-            cidx = int(np.argmin(d2c))
-            cluster_members = clusters[cidx]
-            
-            if cluster_members:
-                # 计算查询向量到聚类成员的距离
-                distances_with_ids = []
-                for dataset_idx, original_id in cluster_members:
-                    if original_id != qid:  # 排除查询本身
-                        member_vec = dataset[dataset_idx]
-                        dist = np.linalg.norm(member_vec - qvec)
-                        distances_with_ids.append((dist, original_id))
-                
-                # 按距离排序并取top-k
-                distances_with_ids.sort(key=lambda x: x[0])
-                results = distances_with_ids[:k]
-                found = {original_id for _, original_id in results}
-            else:
-                found = set()
-            
-            query_times.append(time.time() - t0)
-            
-            # 计算召回率
-            true_neighbors = {nid for _, nid in ground_truth[qid]}
-            correct = len(true_neighbors & found)
-            total_correct += correct
-            individual_recalls.append(correct / k if k else 0.0)
-        
-        overall = total_correct / total_expected if total_expected else 0.0
-        return {
-            'phase': 'clusters_only',
-            'recall_at_k': overall,
-            'avg_query_time_ms': float(np.mean(query_times) * 1000),
-            'std_query_time_ms': float(np.std(query_times) * 1000),
-            'total_correct': total_correct,
-            'total_expected': total_expected,
-            'avg_individual_recall': float(np.mean(individual_recalls)),
-            'n_clusters': n_clusters
-        }
-    
+
     def parameter_sweep(
         self,
         base_index: HNSW,
@@ -411,19 +322,20 @@ class KMeansHNSWEvaluator:
                     phase_records.append({**b_eval, 'k': k})
                     print(f"  [基线HNSW/Baseline HNSW] k={k} ef={actual_child_search_ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
 
-                # Phase 3: K-Means聚类单独评估 - 使用与KMeansHNSW相同的聚类参数
+                # Phase 3: K-Means聚类单独评估 - 使用与KMeansHNSW相同的聚类参数和n_probe值
                 print(f"  使用与KMeansHNSW相同的聚类参数: n_clusters={actual_n_clusters}")
-                kmeans_dataset = kmeans_hnsw._extract_dataset_vectors()
                 for k in k_values:
-                    c_eval = self.evaluate_clusters_only(
-                        kmeans_hnsw.kmeans_model,
-                        kmeans_dataset,  # 使用与聚类时相同的数据集
-                        k,
-                        ground_truths[k],
-                        kmeans_hnsw.base_index  # 传递base_index以获取正确的索引映射
-                    )
-                    phase_records.append({**c_eval, 'k': k})
-                    print(f"  [仅K-Means聚类/Clusters Only] k={k} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
+                    for n_probe in n_probe_values:
+                        c_eval = self._evaluate_pure_kmeans_from_existing(
+                            kmeans_hnsw,  # 直接传递KMeansHNSW对象
+                            k,
+                            ground_truths[k],
+                            n_probe=n_probe
+                        )
+                        # 添加phase标识以便与其他阶段区分
+                        c_eval['phase'] = 'clusters_only'
+                        phase_records.append({**c_eval, 'k': k})
+                        print(f"  [仅K-Means聚类/Clusters Only] k={k} n_probe={n_probe} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
 
                 # Phase 4: K-Means HNSW混合系统完整评估 (Full K-Means HNSW hybrid system evaluation)
                 for k in k_values:
@@ -942,15 +854,7 @@ if __name__ == "__main__":
         matching_ef_time = comparison['comparison_summary']['matching_ef_baseline_time_ms']
         print(f"  Baseline HNSW (same ef): Recall={matching_ef_recall:.4f}, Time={matching_ef_time:.2f}ms")
         
-        # Additional detailed output for pure K-means
-        pure_kmeans_result = comparison['pure_kmeans']
-        print(f"\nDetailed Pure K-Means Results:")
-        print(f"  Overall Recall@{pure_kmeans_result['k']}: {pure_kmeans_result['recall_at_k']:.4f}")
-        print(f"  Average Individual Recall: {pure_kmeans_result['avg_individual_recall']:.4f}")
-        print(f"  Correct/Expected: {pure_kmeans_result['total_correct']}/{pure_kmeans_result['total_expected']}")
-        print(f"  Clustering Time: {pure_kmeans_result['clustering_time']:.2f}s")
-        print(f"  Average Query Time: {pure_kmeans_result['avg_query_time_ms']:.2f}ms")
-        
+
         # Save results
         results = {
             'sweep_results': sweep_results,
