@@ -283,7 +283,8 @@ class KMeansHNSWEvaluator:
         # 预计算所有k值的真实值 (Precompute ground truth for all k values)
         ground_truths = {}
         for k in k_values:
-            ground_truths[k] = self.compute_ground_truth(k)
+            # 查询向量默认并非直接源自 base_index 相同 id 的向量，因此不排除同 id
+            ground_truths[k] = self.compute_ground_truth(k, exclude_query_ids=False)
 
         for i, combination in enumerate(combinations):
             print(f"\n--- Combination {i + 1}/{len(combinations)} ---")
@@ -316,7 +317,7 @@ class KMeansHNSWEvaluator:
 
                 
                 # Phase 1: 基线HNSW评估 - 使用base_index的ef_construction参数
-                base_ef = base_index.ef_construction
+                base_ef = base_index._ef_construction
                 print(f"  使用base_index的ef_construction参数: {base_ef}")
                 for k in k_values:
                     b_eval = self.evaluate_hnsw_baseline(base_index, k, base_ef, ground_truths[k])
@@ -602,7 +603,8 @@ if __name__ == "__main__":
     
     # 构建基础HNSW索引 (Build base HNSW index)
     print("🏗️  构建基础HNSW索引... (Building base HNSW index)")
-    base_index = HNSW(distance_func=distance_func, m=16, ef_construction=100)
+    # 基线 HNSW ef 固定为 200（用户指定逻辑）
+    base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
     
     for i, vector in enumerate(base_vectors):
         base_index.insert(i, vector)
