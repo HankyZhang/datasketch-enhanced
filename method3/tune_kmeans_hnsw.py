@@ -313,14 +313,15 @@ class KMeansHNSWEvaluator:
                 
                 # 从构建的系统中提取实际使用的参数以确保一致性
                 actual_n_clusters = kmeans_hnsw.n_clusters
-                actual_child_search_ef = kmeans_hnsw.child_search_ef
+
                 
-                # Phase 1: 基线HNSW评估 - 使用与KMeansHNSW第一阶段相同的ef参数
-                print(f"  使用与KMeansHNSW第一阶段相同的ef参数: {actual_child_search_ef}")
+                # Phase 1: 基线HNSW评估 - 使用base_index的ef_construction参数
+                base_ef = base_index.ef_construction
+                print(f"  使用base_index的ef_construction参数: {base_ef}")
                 for k in k_values:
-                    b_eval = self.evaluate_hnsw_baseline(base_index, k, actual_child_search_ef, ground_truths[k])
+                    b_eval = self.evaluate_hnsw_baseline(base_index, k, base_ef, ground_truths[k])
                     phase_records.append({**b_eval, 'k': k})
-                    print(f"  [基线HNSW/Baseline HNSW] k={k} ef={actual_child_search_ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
+                    print(f"  [基线HNSW/Baseline HNSW] k={k} ef={base_ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
 
                 # Phase 3: K-Means聚类单独评估 - 使用与KMeansHNSW相同的聚类参数和n_probe值
                 print(f"  使用与KMeansHNSW相同的聚类参数: n_clusters={actual_n_clusters}")
@@ -362,149 +363,6 @@ class KMeansHNSWEvaluator:
         
         print(f"\n🎯 参数扫描完成！测试了 {len(results)} 个组合 (Parameter sweep completed. Tested {len(results)} combinations)")
         return results
-    
-    def find_optimal_parameters(
-        self,
-        sweep_results: List[Dict[str, Any]],
-        optimization_target: str = 'recall_at_k',
-        constraints: Optional[Dict[str, float]] = None
-    ) -> Dict[str, Any]:
-        """
-        Find optimal parameters from sweep results.
-        
-        Args:
-            sweep_results: Results from parameter_sweep()
-            optimization_target: Metric to optimize ('recall_at_k', 'avg_query_time_ms', etc.)
-            constraints: Constraints on other metrics (e.g., {'avg_query_time_ms': 50.0})
-            
-        Returns:
-            Dictionary containing optimal parameters and their performance
-        """
-        print(f"Finding optimal parameters optimizing for {optimization_target}...")
-        
-        best_result = None
-        best_value = -float('inf') if 'recall' in optimization_target else float('inf')
-        
-        for result in sweep_results:
-            for evaluation in result.get('phase_evaluations', []):
-                # Check constraints
-                if constraints:
-                    violates_constraint = False
-                    for constraint_metric, constraint_value in constraints.items():
-                        if constraint_metric in evaluation:
-                            if evaluation[constraint_metric] > constraint_value:
-                                violates_constraint = True
-                                break
-                    if violates_constraint:
-                        continue
-                
-                # Check if this is better
-                current_value = evaluation.get(optimization_target)
-                if current_value is None:
-                    continue
-                
-                is_better = (
-                    (current_value > best_value and 'recall' in optimization_target) or
-                    (current_value < best_value and 'time' in optimization_target)
-                )
-                
-                if is_better:
-                    best_value = current_value
-                    best_result = {
-                        'parameters': result['parameters'],
-                        'performance': evaluation,
-                        'construction_time': result['construction_time']
-                    }
-        
-        if best_result:
-            print(f"Optimal parameters found:")
-            print(f"  Parameters: {best_result['parameters']}")
-            print(f"  {optimization_target}: {best_value:.4f}")
-            print(f"  Construction time: {best_result['construction_time']:.2f}s")
-        else:
-            print("No valid parameters found satisfying constraints.")
-        
-        return best_result or {}
-    
-    def compare_with_baselines(
-        self,
-        kmeans_hnsw: KMeansHNSW,
-        base_index: HNSW,
-        k: int = 10,
-        n_probe: int = 10,
-        ef_values: List[int] = None
-    ) -> Dict[str, Any]:
-        """Compare K-Means HNSW performance with baseline HNSW and pure K-means.
-
-        确保参数一致性：
-        - HNSW基线使用与KMeansHNSW第一阶段相同的ef参数
-        - 纯K-Means使用与KMeansHNSW相同的聚类参数
-        """
-        # 从KMeansHNSW系统获取实际使用的参数
-        actual_n_clusters = kmeans_hnsw.n_clusters
-        actual_child_search_ef = kmeans_hnsw.child_search_ef
-        
-        if ef_values is None:
-            # 使用与KMeansHNSW第一阶段相同的ef参数，以及一些对比值
-            ef_values = [actual_child_search_ef, 50, 100, 200, 400]
-            # 去重并排序
-            ef_values = sorted(set(ef_values))
-
-        print(f"Comparing K-Means HNSW with baseline HNSW and pure K-means...")
-        print(f"KMeansHNSW参数: n_clusters={actual_n_clusters}, child_search_ef={actual_child_search_ef}")
-
-        ground_truth = self.compute_ground_truth(k)
-
-        # K-Means HNSW two-stage
-        kmeans_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truth)
-
-        # Pure k-means - 直接使用KMeansHNSW内部的聚类结果，避免重复聚类
-        print(f"Evaluating pure K-means clustering using EXISTING KMeansHNSW clustering (n_clusters={actual_n_clusters}, n_probe={n_probe})...")
-        kmeans_clustering_result = self._evaluate_pure_kmeans_from_existing(
-            kmeans_hnsw,  # 直接传递KMeansHNSW对象
-            k, 
-            ground_truth,
-            n_probe=n_probe
-        )
-
-        # Baseline HNSW - 直接使用KMeansHNSW内部的base_index，避免重复查询
-        baseline_results = []
-        for ef in ef_values:
-            print(f"Evaluating baseline HNSW with ef={ef}{'[SAME as KMeansHNSW]' if ef == actual_child_search_ef else ''}...")
-            # 使用现有的evaluate_hnsw_baseline方法避免代码重复
-            baseline_result = self.evaluate_hnsw_baseline(kmeans_hnsw.base_index, k, ef, ground_truth)
-            # 转换结果格式以匹配预期的输出格式
-            baseline_results.append({
-                'method': 'baseline_hnsw',
-                'ef': ef,
-                'is_matching_kmeans_ef': (ef == actual_child_search_ef),
-                'recall_at_k': baseline_result['recall_at_k'],
-                'avg_query_time_ms': baseline_result['avg_query_time_ms'],
-                'total_correct': baseline_result['total_correct'],
-                'total_expected': baseline_result['total_expected']
-            })
-
-        return {
-            'kmeans_hnsw': kmeans_result,
-            'pure_kmeans': kmeans_clustering_result,
-            'baseline_hnsw': baseline_results,
-            'parameter_consistency': {
-                'kmeans_n_clusters': actual_n_clusters,
-                'kmeans_child_search_ef': actual_child_search_ef,
-                'pure_kmeans_n_clusters': kmeans_clustering_result['n_clusters'],
-                'baseline_ef_matching_kmeans': actual_child_search_ef
-            },
-            'comparison_summary': {
-                'kmeans_hnsw_recall': kmeans_result['recall_at_k'],
-                'kmeans_hnsw_time_ms': kmeans_result['avg_query_time_ms'],
-                'pure_kmeans_recall': kmeans_clustering_result['recall_at_k'],
-                'pure_kmeans_time_ms': kmeans_clustering_result['avg_query_time_ms'],
-                'best_baseline_recall': max(r['recall_at_k'] for r in baseline_results) if baseline_results else 0.0,
-                'best_baseline_time_ms': min(r['avg_query_time_ms'] for r in baseline_results) if baseline_results else 0.0,
-                'matching_ef_baseline_recall': next((r['recall_at_k'] for r in baseline_results if r['is_matching_kmeans_ef']), 0.0),
-                'matching_ef_baseline_time_ms': next((r['avg_query_time_ms'] for r in baseline_results if r['is_matching_kmeans_ef']), 0.0)
-            }
-        }
     
     def _evaluate_pure_kmeans_from_existing(
         self, 
@@ -799,67 +657,19 @@ if __name__ == "__main__":
         adaptive_config=adaptive_config
     )
     
-    # Find optimal parameters
-    optimal = evaluator.find_optimal_parameters(
-        sweep_results,
-        optimization_target='recall_at_k',
-        constraints={'avg_query_time_ms': 100.0}  # Max 100ms per query
-    )
-    
-    if optimal:
-        # Build system with optimal parameters and compare with baseline
-        print("\nBuilding system with optimal parameters...")
-        optimal_kmeans_hnsw = KMeansHNSW(
-            base_index=base_index,
-            **optimal['parameters'],
-            adaptive_k_children=args.adaptive_k_children,
-            k_children_scale=args.k_children_scale,
-            k_children_min=args.k_children_min,
-            k_children_max=args.k_children_max,
-            diversify_max_assignments=args.diversify_max_assignments,
-            repair_min_assignments=args.repair_min_assignments
-        )
-
-        if args.manual_repair:
-            manual_min = args.manual_repair_min or args.repair_min_assignments or 1
-            print(f"\nManual repair step: ensuring each node has at least {manual_min} assignments...")
-            repair_stats = optimal_kmeans_hnsw.run_repair(min_assignments=manual_min)
-            print(f"Manual repair completed. Coverage={repair_stats['coverage_fraction']:.3f}")
+    # 使用第一个参数组合进行演示 (Use first parameter combination for demonstration)
+    if sweep_results:
+        # 取第一个扫描结果作为演示参数
+        demo_result = sweep_results[0]
+        demo_params = demo_result['parameters']
+        print(f"\nUsing first parameter combination for demonstration: {demo_params}")
         
-        comparison = evaluator.compare_with_baselines(
-            optimal_kmeans_hnsw,
-            base_index,
-            k=10,
-            n_probe=10
-        )
-        
-        print("\nComparison Results:")
-        print(f"K-Means HNSW: Recall={comparison['comparison_summary']['kmeans_hnsw_recall']:.4f}, "
-              f"Time={comparison['comparison_summary']['kmeans_hnsw_time_ms']:.2f}ms")
-        print(f"Pure K-Means: Recall={comparison['comparison_summary']['pure_kmeans_recall']:.4f}, "
-              f"Time={comparison['comparison_summary']['pure_kmeans_time_ms']:.2f}ms")
-        print(f"Best Baseline: Recall={comparison['comparison_summary']['best_baseline_recall']:.4f}, "
-              f"Time={comparison['comparison_summary']['best_baseline_time_ms']:.2f}ms")
-        
-        # 显示参数一致性信息
-        param_consistency = comparison['parameter_consistency']
-        print(f"\n📊 Parameter Consistency (参数一致性):")
-        print(f"  KMeansHNSW n_clusters: {param_consistency['kmeans_n_clusters']}")
-        print(f"  Pure K-Means n_clusters: {param_consistency['pure_kmeans_n_clusters']} {'✓' if param_consistency['kmeans_n_clusters'] == param_consistency['pure_kmeans_n_clusters'] else '✗'}")
-        print(f"  KMeansHNSW child_search_ef: {param_consistency['kmeans_child_search_ef']}")
-        print(f"  Baseline HNSW ef (matching): {param_consistency['baseline_ef_matching_kmeans']}")
-        
-        # 显示使用相同ef参数的HNSW基线性能
-        matching_ef_recall = comparison['comparison_summary']['matching_ef_baseline_recall']
-        matching_ef_time = comparison['comparison_summary']['matching_ef_baseline_time_ms']
-        print(f"  Baseline HNSW (same ef): Recall={matching_ef_recall:.4f}, Time={matching_ef_time:.2f}ms")
-        
+        print("\n🎯 Parameter sweep completed! All comparisons are available in sweep_results.")
 
         # Save results
         results = {
             'sweep_results': sweep_results,
-            'optimal_parameters': optimal,
-            'baseline_comparison': comparison,
+            'demo_parameters': demo_params,
             'adaptive_config': {
                 'adaptive_k_children': args.adaptive_k_children,
                 'k_children_scale': args.k_children_scale,
