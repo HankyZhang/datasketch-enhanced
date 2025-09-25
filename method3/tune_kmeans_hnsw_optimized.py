@@ -720,6 +720,20 @@ if __name__ == "__main__":
                         choices=['line_perp_third', 'max_min_distance'],
                         help='枢纽选择策略')
     
+    # 自适应/多样化/修复选项
+    parser.add_argument('--adaptive-k-children', action='store_true', 
+                        help='启用基于平均聚类大小的自适应k_children')
+    parser.add_argument('--k-children-scale', type=float, default=1.5, 
+                        help='自适应k_children的缩放因子 (默认1.5)')
+    parser.add_argument('--k-children-min', type=int, default=50, 
+                        help='自适应时的最小k_children')
+    parser.add_argument('--k-children-max', type=int, default=None, 
+                        help='自适应时的最大k_children (可选)')
+    parser.add_argument('--diversify-max-assignments', type=int, default=None, 
+                        help='每个子节点的最大分配数 (启用多样化)')
+    parser.add_argument('--repair-min-assignments', type=int, default=None, 
+                        help='构建修复期间每个子节点的最小分配数')
+    
     args = parser.parse_args()
 
     print("🚀 优化版K-Means HNSW + Multi-Pivot参数调优系统")
@@ -770,12 +784,12 @@ if __name__ == "__main__":
     }
     
     adaptive_config = {
-        'adaptive_k_children': False,
-        'k_children_scale': 1.5,
-        'k_children_min': 50,
-        'k_children_max': None,
-        'diversify_max_assignments': None,
-        'repair_min_assignments': None
+        'adaptive_k_children': args.adaptive_k_children,
+        'k_children_scale': args.k_children_scale,
+        'k_children_min': args.k_children_min,
+        'k_children_max': args.k_children_max,
+        'diversify_max_assignments': args.diversify_max_assignments,
+        'repair_min_assignments': args.repair_min_assignments
     }
     
     multi_pivot_config = {
