@@ -12,8 +12,9 @@ Main Components:
 
 from .kmeans_hnsw import KMeansHNSW
 from .tune_kmeans_hnsw import KMeansHNSWEvaluator
+from .kmeans_hnsw_multi_pivot import KMeansHNSWMultiPivot
 
-__all__ = ['KMeansHNSW', 'KMeansHNSWEvaluator']
+__all__ = ['KMeansHNSW', 'KMeansHNSWEvaluator', 'KMeansHNSWMultiPivot']
 
 # Version information
 __version__ = '1.0.0'

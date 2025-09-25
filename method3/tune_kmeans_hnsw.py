@@ -97,7 +97,7 @@ class KMeansHNSWEvaluator:
             return self._ground_truth_cache[cache_key]
         
         print(f"正在计算 {len(self.query_set)} 个查询的真实值 (k={k}, exclude_query_ids={exclude_query_ids})...")
-        print(f"Computing ground truth for {len(self.query_set)} queries against {len(self.dataset)} data points")
+        # print(f"Computing ground truth for {len(self.query_set)} queries against {len(self.dataset)} data points")
         start_time = time.time()
         
         ground_truth = {}
@@ -118,16 +118,16 @@ class KMeansHNSWEvaluator:
             distances.sort()
             ground_truth[query_id] = distances[:k]
             
-            if (i + 1) % 10 == 0:
-                print(f"  已处理 {i + 1}/{len(self.query_set)} 个查询 (Processed {i + 1}/{len(self.query_set)} queries)")
+            # if (i + 1) % 10 == 0:
+            #     print(f"  已处理 {i + 1}/{len(self.query_set)} 个查询 (Processed {i + 1}/{len(self.query_set)} queries)")
         
         elapsed = time.time() - start_time
-        if exclude_query_ids and excluded_count == 0:
-            print(f"⚠️  警告：exclude_query_ids=True但没有排除任何数据点。查询向量可能不在数据集中。")
-            print(f"   Warning: exclude_query_ids=True but no data points were excluded. Query vectors may not be in dataset.")
+        # if exclude_query_ids and excluded_count == 0:
+        #     print(f"⚠️  警告：exclude_query_ids=True但没有排除任何数据点。查询向量可能不在数据集中。")
+        #     print(f"   Warning: exclude_query_ids=True but no data points were excluded. Query vectors may not be in dataset.")
         
         print(f"真实值计算完成，耗时 {elapsed:.2f}秒，排除了 {excluded_count} 个数据点")
-        print(f"Ground truth computed in {elapsed:.2f}s, excluded {excluded_count} data points")
+        # print(f"Ground truth computed in {elapsed:.2f}s, excluded {excluded_count} data points")
         
         self._ground_truth_cache[cache_key] = ground_truth
         return ground_truth
@@ -186,10 +186,10 @@ class KMeansHNSWEvaluator:
             individual_recall = correct / k if k > 0 else 0.0
             individual_recalls.append(individual_recall)
             
-            if (i + 1) % 20 == 0:
-                current_recall = total_correct / ((i + 1) * k)
-                print(f"  Processed {i + 1}/{len(self.query_set)} queries, "
-                      f"current recall: {current_recall:.4f}")
+            # if (i + 1) % 20 == 0:
+            #     current_recall = total_correct / ((i + 1) * k)
+            #     print(f"  Processed {i + 1}/{len(self.query_set)} queries, "
+            #           f"current recall: {current_recall:.4f}")
         
         # Calculate final metrics
         overall_recall = total_correct / total_expected
@@ -401,8 +401,8 @@ class KMeansHNSWEvaluator:
                 # Level-based Hybrid HNSW
                 if enable_hybrid:
                     print(f"  构建并评估Hybrid HNSW (parent_level={hybrid_parent_level}, k_children={params['k_children']})")
-                    print(f"    注意：启用自适应配置以确保与KMeansHNSW公平比较")
-                    print(f"    Note: Enabling adaptive config for fair comparison with KMeansHNSW")
+                    # print(f"    注意：启用自适应配置以确保与KMeansHNSW公平比较")
+                    # print(f"    Note: Enabling adaptive config for fair comparison with KMeansHNSW")
                     try:
                         hybrid_build_start = time.time()
                         hybrid_index = HNSWHybrid(
@@ -430,26 +430,26 @@ class KMeansHNSWEvaluator:
                             print(f"    自适应k_children已启用 (scale={adaptive_config.get('k_children_scale', 1.5)})")
                         
                         # 显示repair/diversify状态
-                        if adaptive_config.get('repair_min_assignments'):
-                            print(f"    ✅ Repair功能已启用 (min_assignments={adaptive_config.get('repair_min_assignments')})")
-                        else:
-                            print(f"    ⚠️ Repair功能未启用 (repair_min_assignments=None)")
-                            print(f"    💡 提示: 启用repair功能可确保coverage=1.0")
+                        # if adaptive_config.get('repair_min_assignments'):
+                        #     print(f"    ✅ Repair功能已启用 (min_assignments={adaptive_config.get('repair_min_assignments')})")
+                        # else:
+                        #     print(f"    ⚠️ Repair功能未启用 (repair_min_assignments=None)")
+                        #     print(f"    💡 提示: 启用repair功能可确保coverage=1.0")
                         
-                        if adaptive_config.get('diversify_max_assignments'):
-                            print(f"    ✅ Diversify功能已启用 (max_assignments={adaptive_config.get('diversify_max_assignments')})")
-                        else:
-                            print(f"    ⚠️ Diversify功能未启用 (diversify_max_assignments=None)")
+                        # if adaptive_config.get('diversify_max_assignments'):
+                        #     print(f"    ✅ Diversify功能已启用 (max_assignments={adaptive_config.get('diversify_max_assignments')})")
+                        # else:
+                        #     print(f"    ⚠️ Diversify功能未启用 (diversify_max_assignments=None)")
                         
-                        # 检查coverage和解释
-                        coverage = hybrid_stats.get('coverage_fraction', 0)
-                        if coverage < 1.0:
-                            print(f"    ⚠️ Coverage = {coverage:.3f} < 1.0")
-                            print(f"    💡 可能原因: parent数量({hybrid_stats.get('num_parents', 0)})不足 或 k_children({hybrid_stats.get('k_children', 'N/A')})太小")
-                            if not adaptive_config.get('repair_min_assignments'):
-                                print(f"    💡 建议: 启用repair功能 --repair-min-assignments 2")
-                        else:
-                            print(f"    ✅ Coverage = {coverage:.3f} (完全覆盖)")
+                        # # 检查coverage和解释
+                        # coverage = hybrid_stats.get('coverage_fraction', 0)
+                        # if coverage < 1.0:
+                        #     print(f"    ⚠️ Coverage = {coverage:.3f} < 1.0")
+                        #     print(f"    💡 可能原因: parent数量({hybrid_stats.get('num_parents', 0)})不足 或 k_children({hybrid_stats.get('k_children', 'N/A')})太小")
+                        #     if not adaptive_config.get('repair_min_assignments'):
+                        #         print(f"    💡 建议: 启用repair功能 --repair-min-assignments 2")
+                        # else:
+                        #     print(f"    ✅ Coverage = {coverage:.3f} (完全覆盖)")
                         
                         for k in k_values:
                             for n_probe in n_probe_values:
@@ -697,7 +697,7 @@ if __name__ == "__main__":
 
     print("🔬 K-Means HNSW参数调优和评估系统 (K-Means HNSW Parameter Tuning and Evaluation)")
     print(f"📊 请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
-    print(f"   Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
+    # print(f"   Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
     
     # 尝试加载SIFT数据，失败则使用合成数据 (Try to load SIFT data, fall back to synthetic unless disabled)
     base_vectors, query_vectors = (None, None)
@@ -716,7 +716,7 @@ if __name__ == "__main__":
     if len(query_vectors) > args.query_size:
         query_vectors = query_vectors[:args.query_size]
     print(f"📈 使用基础向量: {len(base_vectors)} | 查询: {len(query_vectors)} | 维度: {base_vectors.shape[1]}")
-    print(f"   Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
+    # print(f"   Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
     query_ids = list(range(len(query_vectors)))
     
     # 距离函数 (Distance function)
