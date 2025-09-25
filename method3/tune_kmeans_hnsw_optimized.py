@@ -24,6 +24,7 @@ import random
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Hashable
 from itertools import product
+from collections import defaultdict
 
 # 添加父目录到路径 (Add parent directory to path)
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -34,88 +35,6 @@ from hybrid_hnsw.hnsw_hybrid import HNSWHybrid
 from sklearn.cluster import MiniBatchKMeans
 
 
-class OptimizedBuildSystem:
-    """
-    优化构建系统 - 测量和报告构建时间的优化
-    Optimized Build System - Measure and report build time optimizations
-    """
-    
-    def __init__(
-        self,
-        base_index: HNSW,
-        params: Dict[str, Any],
-        adaptive_config: Dict[str, Any]
-    ):
-        self.base_index = base_index
-        self.params = params
-        self.adaptive_config = adaptive_config
-        
-        # 计时统计
-        self.single_pivot_build_time = 0.0
-        self.multi_pivot_build_time = 0.0
-        
-        print(f"  🔄 优化构建系统初始化 (n_clusters={self.params['n_clusters']})...")
-    
-    def create_single_pivot_system(self) -> KMeansHNSW:
-        """创建单枢纽系统，测量构建时间"""
-        print("    - 创建单枢纽KMeans HNSW系统...")
-        
-        start_time = time.time()
-        system = KMeansHNSW(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
-        )
-        self.single_pivot_build_time = time.time() - start_time
-        print(f"      ⏱️ 单枢纽构建时间: {self.single_pivot_build_time:.2f}秒")
-        
-        return system
-    
-    def create_multi_pivot_system(self, multi_pivot_config: Dict[str, Any]) -> KMeansHNSWMultiPivot:
-        """创建多枢纽系统，测量构建时间"""
-        print(f"    - 创建多枢纽KMeans HNSW系统 (pivots={multi_pivot_config.get('num_pivots', 3)})...")
-        
-        start_time = time.time()
-        system = KMeansHNSWMultiPivot(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            # Multi-pivot specific parameters
-            num_pivots=multi_pivot_config.get('num_pivots', 3),
-            pivot_selection_strategy=multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third'),
-            pivot_overquery_factor=multi_pivot_config.get('pivot_overquery_factor', 1.2),
-            multi_pivot_enabled=True,
-            store_pivot_debug=True,
-            # Adaptive/diversify/repair config
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
-        )
-        self.multi_pivot_build_time = time.time() - start_time
-        print(f"      ⏱️ 多枢纽构建时间: {self.multi_pivot_build_time:.2f}秒")
-        
-        return system
-    
-    def get_timing_summary(self) -> Dict[str, Any]:
-        """获取构建时间总结"""
-        total_time = self.single_pivot_build_time + self.multi_pivot_build_time
-        return {
-            'single_pivot_build_time': self.single_pivot_build_time,
-            'multi_pivot_build_time': self.multi_pivot_build_time, 
-            'total_build_time': total_time,
-            'optimization_note': '当前版本重点在于性能测量和对比分析'
-        }
 
 
 class SharedKMeansHNSWSystem:
@@ -304,6 +223,11 @@ class OptimizedSinglePivotSystem:
         k_children = self.shared_system.params['k_children']
         child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
         
+        # 检查是否需要计算分配统计（用于diversify或repair）
+        need_counts = (self.adaptive_config.get('diversify_max_assignments') is not None) or \
+                     (self.adaptive_config.get('repair_min_assignments') is not None)
+        assignment_counts = {} if need_counts else None
+        
         self.parent_child_map = {}
         
         for cluster_idx, centroid_id in enumerate(self.centroid_ids):
@@ -318,7 +242,20 @@ class OptimizedSinglePivotSystem:
                     ef=child_search_ef
                 )
                 children = [node_id for node_id, _ in hnsw_results]
+                
+                # Apply diversify filter if enabled
+                if self.adaptive_config.get('diversify_max_assignments') is not None:
+                    children = self._apply_diversify_filter(
+                        children, assignment_counts, 
+                        self.adaptive_config['diversify_max_assignments']
+                    )
+                
                 self.parent_child_map[centroid_id] = children
+                
+                # Update assignment counts
+                if need_counts:
+                    for child_id in children:
+                        assignment_counts[child_id] = assignment_counts.get(child_id, 0) + 1
                 
                 # 确保子节点向量在child_vectors中
                 for child_id in children:
@@ -329,6 +266,10 @@ class OptimizedSinglePivotSystem:
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的子节点查找失败: {e}")
                 self.parent_child_map[centroid_id] = []
+        
+        # Apply repair phase if enabled
+        if self.adaptive_config.get('repair_min_assignments') is not None:
+            self._repair_child_assignments(assignment_counts)
         
         total_children = sum(len(children) for children in self.parent_child_map.values())
         avg_children = total_children / max(1, len(self.parent_child_map))
@@ -388,6 +329,82 @@ class OptimizedSinglePivotSystem:
         # 排序并返回top-k
         sorted_indices = np.argsort(distances)[:k]
         return [(valid_ids[i], distances[i]) for i in sorted_indices]
+    
+    def _apply_diversify_filter(
+        self, 
+        children: List[Hashable], 
+        assignment_counts: Dict[Hashable, int], 
+        max_assignments: int
+    ) -> List[Hashable]:
+        """Apply diversify filter to limit child assignments."""
+        filtered_children = []
+        for child_id in children:
+            current_count = assignment_counts.get(child_id, 0)
+            if current_count < max_assignments:
+                filtered_children.append(child_id)
+        return filtered_children
+    
+    def _repair_child_assignments(self, assignment_counts: Dict[Hashable, int]):
+        """Repair phase: ensure every child has minimum assignments."""
+        min_assignments = self.adaptive_config.get('repair_min_assignments')
+        if not min_assignments:
+            return
+            
+        print(f"        🔧 Repair phase: ensuring minimum {min_assignments} assignments...")
+        
+        # Find under-assigned children
+        all_base_nodes = set(self.base_index.keys())
+        assigned_nodes = set(assignment_counts.keys())
+        unassigned_nodes = all_base_nodes - assigned_nodes
+        
+        under_assigned = {
+            node_id for node_id, count in assignment_counts.items()
+            if count < min_assignments
+        }
+        under_assigned.update(unassigned_nodes)
+        
+        print(f"        Found {len(under_assigned)} under-assigned nodes "
+              f"({len(unassigned_nodes)} completely unassigned)")
+        
+        # For each under-assigned node, find closest centroids and assign
+        for node_id in under_assigned:
+            try:
+                # Get the node's vector
+                if node_id in self.shared_system.node_id_to_idx:
+                    idx = self.shared_system.node_id_to_idx[node_id]
+                    node_vector = self.shared_system.dataset_vectors[idx]
+                else:
+                    continue  # Skip if we can't get the vector
+                
+                # Find distance to all centroids
+                distances = []
+                for i, centroid_vector in enumerate(self.centroids):
+                    dist = np.linalg.norm(node_vector - centroid_vector)
+                    distances.append((dist, self.centroid_ids[i]))
+                
+                # Sort by distance and assign to closest centroids
+                distances.sort()
+                current_assignments = assignment_counts.get(node_id, 0)
+                needed_assignments = max(0, min_assignments - current_assignments)
+                
+                for _, centroid_id in distances[:needed_assignments]:
+                    if node_id not in self.parent_child_map[centroid_id]:
+                        self.parent_child_map[centroid_id].append(node_id)
+                        assignment_counts[node_id] = assignment_counts.get(node_id, 0) + 1
+                        
+                        # Ensure vector is available
+                        if node_id not in self.child_vectors:
+                            self.child_vectors[node_id] = node_vector
+                            
+            except Exception as e:
+                print(f"        ⚠️ Failed to repair node {node_id}: {e}")
+                continue
+        
+        # Report coverage after repair
+        final_assigned = set(assignment_counts.keys())
+        coverage = len(final_assigned) / len(all_base_nodes) if all_base_nodes else 0.0
+        print(f"        Repair completed. Final coverage: {coverage:.3f} "
+              f"({len(final_assigned)}/{len(all_base_nodes)} nodes)")
     
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
