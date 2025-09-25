@@ -750,11 +750,30 @@ if __name__ == "__main__":
     parser.add_argument('--pivot-overquery-factor', type=float, default=1.2,
                         help='枢纽查询的过度查询因子 (默认: 1.2)')
     
+    # 优化选项
+    parser.add_argument('--use-optimized', action='store_true',
+                        help='使用优化版本减少重复计算 (共享K-Means聚类)')
+    
     args = parser.parse_args()
 
     print("🔬 K-Means HNSW + Multi-Pivot参数调优和评估系统")
     print(f"📊 请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
     print(f"🎯 Multi-Pivot启用状态: {args.enable_multi_pivot}")
+    print(f"🚀 优化版本启用: {args.use_optimized} {'(减少重复K-Means聚类计算)' if args.use_optimized else ''}")
+    
+    # 如果启用优化版本，使用优化的评估器
+    if args.use_optimized:
+        print("⚡ 使用优化版评估器，将自动减少重复计算...")
+        # 导入优化版评估器
+        try:
+            from tune_kmeans_hnsw_optimized import OptimizedKMeansHNSWMultiPivotEvaluator
+            optimized_available = True
+        except ImportError:
+            print("⚠️ 优化版评估器不可用，将使用标准版本")
+            optimized_available = False
+        
+        if not optimized_available:
+            args.use_optimized = False
     
     # 尝试加载SIFT数据，失败则使用合成数据
     base_vectors, query_vectors = (None, None)
@@ -789,8 +808,13 @@ if __name__ == "__main__":
     
     print(f"Base HNSW index built with {len(base_index)} vectors")
     
-    # Initialize evaluator
-    evaluator = KMeansHNSWMultiPivotEvaluator(base_vectors, query_vectors, query_ids, distance_func)
+    # Initialize evaluator (standard or optimized version)
+    if args.use_optimized:
+        evaluator = OptimizedKMeansHNSWMultiPivotEvaluator(base_vectors, query_vectors, query_ids, distance_func)
+        print("✅ 使用优化版评估器")
+    else:
+        evaluator = KMeansHNSWMultiPivotEvaluator(base_vectors, query_vectors, query_ids, distance_func)
+        print("✅ 使用标准版评估器")
     
     # Define parameter grid for sweep
     if args.dataset_size <= 2000:
@@ -835,14 +859,26 @@ if __name__ == "__main__":
     print("\nStarting parameter sweep...")
     max_combos = 9 if len(cluster_options) > 1 else None
     
-    sweep_results = evaluator.parameter_sweep(
-        base_index,
-        param_grid,
-        evaluation_params,
-        max_combinations=max_combos,
-        adaptive_config=adaptive_config,
-        multi_pivot_config=multi_pivot_config
-    )
+    if args.use_optimized:
+        # 使用优化版参数扫描
+        sweep_results = evaluator.optimized_parameter_sweep(
+            base_index,
+            param_grid,
+            evaluation_params,
+            max_combinations=max_combos,
+            adaptive_config=adaptive_config,
+            multi_pivot_config=multi_pivot_config
+        )
+    else:
+        # 使用标准版参数扫描
+        sweep_results = evaluator.parameter_sweep(
+            base_index,
+            param_grid,
+            evaluation_params,
+            max_combinations=max_combos,
+            adaptive_config=adaptive_config,
+            multi_pivot_config=multi_pivot_config
+        )
     
     # Save results
     if sweep_results:
@@ -856,15 +892,22 @@ if __name__ == "__main__":
             'demo_parameters': demo_params,
             'multi_pivot_config': multi_pivot_config,
             'adaptive_config': adaptive_config,
+            'optimization_info': {
+                'optimized_version_used': args.use_optimized,
+                'optimization_description': '共享K-Means聚类计算以减少重复构建时间' if args.use_optimized else '标准版本，每个系统独立构建'
+            },
             'evaluation_info': {
                 'dataset_size': len(base_vectors),
                 'query_size': len(query_vectors),
                 'dimension': base_vectors.shape[1],
                 'multi_pivot_enabled': args.enable_multi_pivot,
+                'optimization_enabled': args.use_optimized,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
         }
-        save_results(results, 'multi_pivot_parameter_sweep.json')
+        
+        output_filename = 'optimized_multi_pivot_results.json' if args.use_optimized else 'multi_pivot_parameter_sweep.json'
+        save_results(results, output_filename)
         
     print(f"\n✅ Multi-Pivot parameter tuning completed!")
     if args.enable_multi_pivot:
