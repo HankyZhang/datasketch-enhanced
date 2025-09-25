@@ -22,7 +22,7 @@ import json
 import argparse
 import random
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Hashable
 from itertools import product
 
 # 添加父目录到路径 (Add parent directory to path)
@@ -118,8 +118,8 @@ class OptimizedBuildSystem:
         }
 
 
-class SharedComputationSystem:
-    """管理K-Means HNSW的共享计算结果"""
+class SharedKMeansHNSWSystem:
+    """共享HNSW索引和K-Means聚类计算的系统"""
     
     def __init__(self, base_index: HNSW, params: Dict[str, Any], adaptive_config: Dict[str, Any]):
         """
@@ -133,25 +133,37 @@ class SharedComputationSystem:
         self.base_index = base_index
         self.params = params
         self.adaptive_config = adaptive_config
+        self.distance_func = base_index._distance_func
+        
+        # 构建时间统计
         self.single_pivot_build_time = 0.0
         self.multi_pivot_build_time = 0.0
+        self.shared_clustering_time = 0.0
         
-        # 执行共享的K-Means聚类计算
-        self._perform_shared_clustering()
-        
-        # 计算优化统计
-        self.optimization_stats = {
-            'total_build_time': 0.0,
-            'timing_comparison': {},
-            'memory_usage': None
-        }
+        # 执行共享的聚类计算和公共组件构建
+        self._build_shared_components()
     
-    def _perform_shared_clustering(self):
-        """执行共享的K-Means聚类计算"""
-        print("    📊 执行共享K-Means聚类计算...")
+    def _build_shared_components(self):
+        """构建所有共享的组件：聚类、向量索引、公共数据结构"""
+        print("    📊 构建共享组件：向量提取 + K-Means聚类...")
         start_time = time.time()
         
-        # 从HNSW索引提取向量数据
+        # 1. 从HNSW索引提取向量数据和ID映射
+        self._extract_vectors_and_ids()
+        
+        # 2. 执行K-Means聚类
+        self._perform_kmeans_clustering()
+        
+        # 3. 构建共享的查找结构
+        self._build_shared_lookup_structures()
+        
+        self.shared_clustering_time = time.time() - start_time
+        print(f"      ✅ 共享组件构建完成 ({self.shared_clustering_time:.3f}s)")
+        print(f"         - 向量数量: {len(self.node_vectors)}")
+        print(f"         - 聚类数量: {len(self.centroids)}")
+    
+    def _extract_vectors_and_ids(self):
+        """从HNSW索引提取向量数据"""
         node_vectors = []
         self.node_ids = []
         
@@ -167,7 +179,11 @@ class SharedComputationSystem:
         
         self.node_vectors = np.array(node_vectors)
         
-        # 执行K-Means聚类
+        # 构建ID到索引的映射
+        self.node_id_to_idx = {node_id: i for i, node_id in enumerate(self.node_ids)}
+        
+    def _perform_kmeans_clustering(self):
+        """执行K-Means聚类"""
         n_clusters = self.params['n_clusters']
         actual_clusters = min(n_clusters, len(self.node_vectors))
         
@@ -180,63 +196,47 @@ class SharedComputationSystem:
         
         self.cluster_labels = self.kmeans_model.fit_predict(self.node_vectors)
         self.centroids = self.kmeans_model.cluster_centers_
+        self.n_clusters = actual_clusters
         
-        clustering_time = time.time() - start_time
-        print(f"      ✅ 聚类完成: {len(self.node_vectors)} vectors -> {actual_clusters} clusters ({clustering_time:.3f}s)")
+    def _build_shared_lookup_structures(self):
+        """构建共享的查找结构"""
+        # 聚类ID分配
+        self.centroid_ids = [f"centroid_{i}" for i in range(len(self.centroids))]
         
-        # 构建聚类映射
+        # 构建聚类映射：cluster_label -> [node_ids]
         self.cluster_assignments = {}
         for i, (node_id, label) in enumerate(zip(self.node_ids, self.cluster_labels)):
             if label not in self.cluster_assignments:
                 self.cluster_assignments[label] = []
             self.cluster_assignments[label].append(node_id)
-    
-    def create_single_pivot_system(self) -> KMeansHNSW:
-        """创建单枢纽系统，测量构建时间"""
-        print("    - 创建单枢纽KMeans HNSW系统...")
+        
+        # 构建向量字典供子系统使用
+        self.child_vectors = {}
+        for node_id in self.node_ids:
+            idx = self.node_id_to_idx[node_id] 
+            self.child_vectors[node_id] = self.node_vectors[idx]
+        
+        # 向量化查找矩阵
+        self._centroid_matrix = self.centroids.copy()
+        self._centroid_id_array = np.array(self.centroid_ids)
+        
+    def create_single_pivot_system(self) -> 'OptimizedSinglePivotSystem':
+        """创建单枢纽系统，复用共享聚类结果"""
+        print("    - 创建单枢纽KMeans HNSW系统 (复用共享聚类)...")
         
         start_time = time.time()
-        system = KMeansHNSW(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
-        )
+        system = OptimizedSinglePivotSystem(self, self.adaptive_config)
         self.single_pivot_build_time = time.time() - start_time
         print(f"      ⏱️ 单枢纽构建时间: {self.single_pivot_build_time:.2f}秒")
         
         return system
     
-    def create_multi_pivot_system(self, multi_pivot_config: Dict[str, Any]) -> KMeansHNSWMultiPivot:
-        """创建多枢纽系统，测量构建时间"""
+    def create_multi_pivot_system(self, multi_pivot_config: Dict[str, Any]) -> 'OptimizedMultiPivotSystem':
+        """创建多枢纽系统，复用共享聚类结果"""
         print(f"    - 创建多枢纽KMeans HNSW系统 (pivots={multi_pivot_config.get('num_pivots', 3)})...")
         
         start_time = time.time()
-        system = KMeansHNSWMultiPivot(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            # Multi-pivot specific parameters
-            num_pivots=multi_pivot_config.get('num_pivots', 3),
-            pivot_selection_strategy=multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third'),
-            pivot_overquery_factor=multi_pivot_config.get('pivot_overquery_factor', 1.2),
-            multi_pivot_enabled=True,
-            store_pivot_debug=True,
-            # Adaptive/diversify/repair config
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
-        )
+        system = OptimizedMultiPivotSystem(self, self.adaptive_config, multi_pivot_config)
         self.multi_pivot_build_time = time.time() - start_time
         print(f"      ⏱️ 多枢纽构建时间: {self.multi_pivot_build_time:.2f}秒")
         
@@ -246,11 +246,459 @@ class SharedComputationSystem:
         """获取构建时间总结"""
         total_time = self.single_pivot_build_time + self.multi_pivot_build_time
         return {
+            'shared_clustering_time': self.shared_clustering_time,
             'single_pivot_build_time': self.single_pivot_build_time,
             'multi_pivot_build_time': self.multi_pivot_build_time, 
             'total_build_time': total_time,
-            'optimization_note': '当前版本重点在于性能测量和对比分析'
+            'optimization_note': '使用共享聚类结果，避免重复计算'
         }
+
+
+class OptimizedSinglePivotSystem:
+    """优化的单枢纽系统 - 复用共享聚类结果"""
+    
+    def __init__(self, shared_system: SharedKMeansHNSWSystem, adaptive_config: Dict[str, Any]):
+        """
+        初始化单枢纽系统
+        
+        Args:
+            shared_system: 包含共享聚类结果的系统
+            adaptive_config: 自适应配置
+        """
+        self.shared_system = shared_system
+        self.adaptive_config = adaptive_config
+        self.base_index = shared_system.base_index
+        self.distance_func = shared_system.distance_func
+        
+        # 从共享系统获取基础数据
+        self.centroids = shared_system.centroids
+        self.centroid_ids = shared_system.centroid_ids
+        self.cluster_assignments = shared_system.cluster_assignments
+        self.child_vectors = shared_system.child_vectors.copy()
+        self.n_clusters = shared_system.n_clusters
+        self.node_vectors = shared_system.node_vectors
+        self.node_ids = shared_system.node_ids
+        
+        # 构建父子节点映射 - 单枢纽策略
+        self._build_single_pivot_parent_child_mapping()
+        
+        # 向量化查找矩阵 (复用共享系统的)
+        self._centroid_matrix = shared_system._centroid_matrix
+        self._centroid_id_array = shared_system._centroid_id_array
+        
+        # 统计信息
+        self.stats = {
+            'method': 'single_pivot_optimized',
+            'n_clusters': self.n_clusters,
+            'num_children': len(self.child_vectors),
+            'reused_shared_clustering': True
+        }
+        self.search_times = []
+    
+    def _build_single_pivot_parent_child_mapping(self):
+        """构建单枢纽的父子节点映射"""
+        print("      📍 构建单枢纽父子节点映射...")
+        
+        k_children = self.shared_system.params['k_children']
+        child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
+        
+        self.parent_child_map = {}
+        
+        for cluster_idx, centroid_id in enumerate(self.centroid_ids):
+            # 使用质心作为单一枢纽点
+            centroid_vector = self.centroids[cluster_idx]
+            
+            # 使用HNSW搜索找到最近的k_children个节点
+            try:
+                hnsw_results = self.base_index.query(
+                    centroid_vector, 
+                    k=k_children, 
+                    ef=child_search_ef
+                )
+                children = [node_id for node_id, _ in hnsw_results]
+                self.parent_child_map[centroid_id] = children
+                
+                # 确保子节点向量在child_vectors中
+                for child_id in children:
+                    if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
+                        idx = self.shared_system.node_id_to_idx[child_id]
+                        self.child_vectors[child_id] = self.node_vectors[idx]
+                        
+            except Exception as e:
+                print(f"        ⚠️ 质心 {centroid_id} 的子节点查找失败: {e}")
+                self.parent_child_map[centroid_id] = []
+        
+        total_children = sum(len(children) for children in self.parent_child_map.values())
+        avg_children = total_children / max(1, len(self.parent_child_map))
+        print(f"      ✅ 单枢纽映射完成: {total_children} 个子节点, 平均 {avg_children:.1f} 个/质心")
+    
+    def search(self, query_vector: np.ndarray, k: int = 10, n_probe: int = 10) -> List[Tuple[Hashable, float]]:
+        """两阶段搜索：质心搜索 → 子节点搜索"""
+        start = time.time()
+        
+        # Stage 1: 找到最近的质心
+        closest_centroids = self._stage1_centroid_search(query_vector, n_probe)
+        
+        # Stage 2: 在选定质心的子节点中搜索
+        results = self._stage2_child_search(query_vector, closest_centroids, k)
+        
+        # 记录搜索时间
+        elapsed = (time.time() - start) * 1000.0
+        self.search_times.append(elapsed)
+        
+        return results
+    
+    def _stage1_centroid_search(self, query_vector: np.ndarray, n_probe: int) -> List[Tuple[str, float]]:
+        """Stage 1: 找到最近的K-Means质心"""
+        diffs = self._centroid_matrix - query_vector
+        distances = np.linalg.norm(diffs, axis=1)
+        indices = np.argsort(distances)[:n_probe]
+        return [(self.centroid_ids[i], distances[i]) for i in indices]
+    
+    def _stage2_child_search(self, query_vector: np.ndarray, closest_centroids: List[Tuple[str, float]], k: int) -> List[Tuple[Hashable, float]]:
+        """Stage 2: 在子节点中搜索"""
+        # 收集候选子节点
+        candidate_children = set()
+        for centroid_id, _ in closest_centroids:
+            children = self.parent_child_map.get(centroid_id, [])
+            candidate_children.update(children)
+        
+        if not candidate_children:
+            return []
+        
+        # 构建候选向量矩阵
+        candidate_ids = list(candidate_children)
+        vectors = []
+        valid_ids = []
+        
+        for cid in candidate_ids:
+            if cid in self.child_vectors:
+                vectors.append(self.child_vectors[cid])
+                valid_ids.append(cid)
+        
+        if not vectors:
+            return []
+        
+        # 向量化距离计算
+        candidate_matrix = np.vstack(vectors)
+        distances = np.linalg.norm(candidate_matrix - query_vector, axis=1)
+        
+        # 排序并返回top-k
+        sorted_indices = np.argsort(distances)[:k]
+        return [(valid_ids[i], distances[i]) for i in sorted_indices]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取统计信息"""
+        stats = self.stats.copy()
+        if self.search_times:
+            stats['avg_search_time_ms'] = float(np.mean(self.search_times))
+            stats['std_search_time_ms'] = float(np.std(self.search_times))
+        return stats
+
+
+class OptimizedMultiPivotSystem:
+    """优化的多枢纽系统 - 复用共享聚类结果"""
+    
+    def __init__(self, shared_system: SharedKMeansHNSWSystem, adaptive_config: Dict[str, Any], multi_pivot_config: Dict[str, Any]):
+        """
+        初始化多枢纽系统
+        
+        Args:
+            shared_system: 包含共享聚类结果的系统
+            adaptive_config: 自适应配置
+            multi_pivot_config: 多枢纽配置
+        """
+        self.shared_system = shared_system
+        self.adaptive_config = adaptive_config
+        self.multi_pivot_config = multi_pivot_config
+        self.base_index = shared_system.base_index
+        self.distance_func = shared_system.distance_func
+        
+        # 从共享系统获取基础数据
+        self.centroids = shared_system.centroids
+        self.centroid_ids = shared_system.centroid_ids
+        self.cluster_assignments = shared_system.cluster_assignments
+        self.child_vectors = shared_system.child_vectors.copy()
+        self.n_clusters = shared_system.n_clusters
+        self.node_vectors = shared_system.node_vectors
+        self.node_ids = shared_system.node_ids
+        
+        # 多枢纽参数
+        self.num_pivots = multi_pivot_config.get('num_pivots', 3)
+        self.pivot_selection_strategy = multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third')
+        self.pivot_overquery_factor = multi_pivot_config.get('pivot_overquery_factor', 1.2)
+        
+        # 构建父子节点映射 - 多枢纽策略
+        self._build_multi_pivot_parent_child_mapping()
+        
+        # 向量化查找矩阵 (复用共享系统的)
+        self._centroid_matrix = shared_system._centroid_matrix
+        self._centroid_id_array = shared_system._centroid_id_array
+        
+        # 统计信息
+        self.stats = {
+            'method': 'multi_pivot_optimized',
+            'n_clusters': self.n_clusters,
+            'num_children': len(self.child_vectors),
+            'num_pivots': self.num_pivots,
+            'pivot_strategy': self.pivot_selection_strategy,
+            'reused_shared_clustering': True
+        }
+        self.search_times = []
+    
+    def _build_multi_pivot_parent_child_mapping(self):
+        """构建多枢纽的父子节点映射"""
+        print(f"      🎯 构建多枢纽父子节点映射 (pivots={self.num_pivots})...")
+        
+        k_children = self.shared_system.params['k_children']
+        child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
+        overquery_k = int(k_children * self.pivot_overquery_factor)
+        
+        self.parent_child_map = {}
+        
+        for cluster_idx, centroid_id in enumerate(self.centroid_ids):
+            try:
+                # 获取多个枢纽点
+                pivots = self._select_pivots_for_centroid(cluster_idx, overquery_k, child_search_ef)
+                
+                # 对每个枢纽点进行查询并合并结果
+                all_candidates = set()
+                for pivot_vector in pivots:
+                    hnsw_results = self.base_index.query(
+                        pivot_vector, 
+                        k=overquery_k, 
+                        ef=child_search_ef
+                    )
+                    for node_id, _ in hnsw_results:
+                        all_candidates.add(node_id)
+                
+                # 计算所有候选点到各枢纽的距离，选择最优的k_children个
+                children = self._select_best_children_from_candidates(
+                    list(all_candidates), pivots, k_children
+                )
+                
+                self.parent_child_map[centroid_id] = children
+                
+                # 确保子节点向量在child_vectors中
+                for child_id in children:
+                    if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
+                        idx = self.shared_system.node_id_to_idx[child_id]
+                        self.child_vectors[child_id] = self.node_vectors[idx]
+                        
+            except Exception as e:
+                print(f"        ⚠️ 质心 {centroid_id} 的多枢纽子节点查找失败: {e}")
+                self.parent_child_map[centroid_id] = []
+        
+        total_children = sum(len(children) for children in self.parent_child_map.values())
+        avg_children = total_children / max(1, len(self.parent_child_map))
+        print(f"      ✅ 多枢纽映射完成: {total_children} 个子节点, 平均 {avg_children:.1f} 个/质心")
+    
+    def _select_pivots_for_centroid(self, cluster_idx: int, overquery_k: int, child_search_ef: int) -> List[np.ndarray]:
+        """为质心选择多个枢纽点"""
+        centroid_vector = self.centroids[cluster_idx]
+        pivots = [centroid_vector]  # 第一个枢纽总是质心本身
+        
+        if self.num_pivots <= 1:
+            return pivots
+        
+        try:
+            # 第一次查询：以质心为枢纽
+            first_results = self.base_index.query(centroid_vector, k=overquery_k, ef=child_search_ef)
+            candidate_ids = [node_id for node_id, _ in first_results]
+            
+            if len(candidate_ids) < 2:
+                return pivots
+            
+            # 获取候选向量
+            candidate_vectors = []
+            valid_candidate_ids = []
+            for cid in candidate_ids:
+                if cid in self.shared_system.node_id_to_idx:
+                    idx = self.shared_system.node_id_to_idx[cid]
+                    candidate_vectors.append(self.node_vectors[idx])
+                    valid_candidate_ids.append(cid)
+            
+            if len(candidate_vectors) < 2:
+                return pivots
+            
+            candidate_vectors = np.array(candidate_vectors)
+            
+            # 第二个枢纽：距离质心最远的点
+            distances = np.linalg.norm(candidate_vectors - centroid_vector, axis=1)
+            farthest_idx = np.argmax(distances)
+            second_pivot = candidate_vectors[farthest_idx]
+            pivots.append(second_pivot)
+            
+            if self.num_pivots <= 2:
+                return pivots
+            
+            # 第三个枢纽：根据策略选择
+            if self.pivot_selection_strategy == 'line_perp_third':
+                third_pivot = self._find_perpendicular_pivot(centroid_vector, second_pivot, candidate_vectors)
+                if third_pivot is not None:
+                    pivots.append(third_pivot)
+            
+            # 后续枢纽：max-min distance策略
+            while len(pivots) < self.num_pivots and len(candidate_vectors) > len(pivots):
+                next_pivot = self._find_max_min_distance_pivot(pivots, candidate_vectors)
+                if next_pivot is not None:
+                    pivots.append(next_pivot)
+                else:
+                    break
+                    
+        except Exception as e:
+            print(f"        ⚠️ 枢纽选择失败，使用质心: {e}")
+        
+        return pivots
+    
+    def _find_perpendicular_pivot(self, pivot_a: np.ndarray, pivot_b: np.ndarray, candidates: np.ndarray) -> Optional[np.ndarray]:
+        """找到垂直于A-B线段距离最大的点"""
+        try:
+            ab_vector = pivot_b - pivot_a
+            ab_norm = np.linalg.norm(ab_vector)
+            
+            if ab_norm < 1e-6:
+                return None
+            
+            ab_unit = ab_vector / ab_norm
+            
+            # 计算每个候选点到直线AB的垂直距离
+            perp_distances = []
+            for candidate in candidates:
+                ac_vector = candidate - pivot_a
+                projection_length = np.dot(ac_vector, ab_unit)
+                projection_point = pivot_a + projection_length * ab_unit
+                perp_distance = np.linalg.norm(candidate - projection_point)
+                perp_distances.append(perp_distance)
+            
+            max_perp_idx = np.argmax(perp_distances)
+            return candidates[max_perp_idx]
+            
+        except Exception:
+            return None
+    
+    def _find_max_min_distance_pivot(self, existing_pivots: List[np.ndarray], candidates: np.ndarray) -> Optional[np.ndarray]:
+        """找到与现有枢纽最小距离最大的候选点"""
+        try:
+            best_candidate = None
+            best_min_distance = -1
+            
+            for candidate in candidates:
+                # 计算到所有现有枢纽的距离
+                min_distance = float('inf')
+                for pivot in existing_pivots:
+                    distance = np.linalg.norm(candidate - pivot)
+                    min_distance = min(min_distance, distance)
+                
+                # 选择最小距离最大的候选点
+                if min_distance > best_min_distance:
+                    best_min_distance = min_distance
+                    best_candidate = candidate
+            
+            return best_candidate
+            
+        except Exception:
+            return None
+    
+    def _select_best_children_from_candidates(self, candidate_ids: List[Hashable], pivots: List[np.ndarray], k_children: int) -> List[Hashable]:
+        """从候选节点中选择最优的k_children个子节点"""
+        if len(candidate_ids) <= k_children:
+            return candidate_ids
+        
+        try:
+            # 获取候选向量
+            candidate_vectors = []
+            valid_ids = []
+            
+            for cid in candidate_ids:
+                if cid in self.shared_system.node_id_to_idx:
+                    idx = self.shared_system.node_id_to_idx[cid]
+                    candidate_vectors.append(self.node_vectors[idx])
+                    valid_ids.append(cid)
+            
+            if len(candidate_vectors) <= k_children:
+                return valid_ids
+            
+            candidate_vectors = np.array(candidate_vectors)
+            
+            # 计算每个候选点到最近枢纽的距离
+            min_distances = []
+            for candidate in candidate_vectors:
+                min_dist = float('inf')
+                for pivot in pivots:
+                    dist = np.linalg.norm(candidate - pivot)
+                    min_dist = min(min_dist, dist)
+                min_distances.append(min_dist)
+            
+            # 选择距离最小的k_children个
+            sorted_indices = np.argsort(min_distances)[:k_children]
+            return [valid_ids[i] for i in sorted_indices]
+            
+        except Exception:
+            return candidate_ids[:k_children]
+    
+    def search(self, query_vector: np.ndarray, k: int = 10, n_probe: int = 10) -> List[Tuple[Hashable, float]]:
+        """两阶段搜索：质心搜索 → 子节点搜索"""
+        start = time.time()
+        
+        # Stage 1: 找到最近的质心
+        closest_centroids = self._stage1_centroid_search(query_vector, n_probe)
+        
+        # Stage 2: 在选定质心的子节点中搜索
+        results = self._stage2_child_search(query_vector, closest_centroids, k)
+        
+        # 记录搜索时间
+        elapsed = (time.time() - start) * 1000.0
+        self.search_times.append(elapsed)
+        
+        return results
+    
+    def _stage1_centroid_search(self, query_vector: np.ndarray, n_probe: int) -> List[Tuple[str, float]]:
+        """Stage 1: 找到最近的K-Means质心"""
+        diffs = self._centroid_matrix - query_vector
+        distances = np.linalg.norm(diffs, axis=1)
+        indices = np.argsort(distances)[:n_probe]
+        return [(self.centroid_ids[i], distances[i]) for i in indices]
+    
+    def _stage2_child_search(self, query_vector: np.ndarray, closest_centroids: List[Tuple[str, float]], k: int) -> List[Tuple[Hashable, float]]:
+        """Stage 2: 在子节点中搜索"""
+        # 收集候选子节点
+        candidate_children = set()
+        for centroid_id, _ in closest_centroids:
+            children = self.parent_child_map.get(centroid_id, [])
+            candidate_children.update(children)
+        
+        if not candidate_children:
+            return []
+        
+        # 构建候选向量矩阵
+        candidate_ids = list(candidate_children)
+        vectors = []
+        valid_ids = []
+        
+        for cid in candidate_ids:
+            if cid in self.child_vectors:
+                vectors.append(self.child_vectors[cid])
+                valid_ids.append(cid)
+        
+        if not vectors:
+            return []
+        
+        # 向量化距离计算
+        candidate_matrix = np.vstack(vectors)
+        distances = np.linalg.norm(candidate_matrix - query_vector, axis=1)
+        
+        # 排序并返回top-k
+        sorted_indices = np.argsort(distances)[:k]
+        return [(valid_ids[i], distances[i]) for i in sorted_indices]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取统计信息"""
+        stats = self.stats.copy()
+        if self.search_times:
+            stats['avg_search_time_ms'] = float(np.mean(self.search_times))
+            stats['std_search_time_ms'] = float(np.std(self.search_times))
+        return stats
 
 
 class OptimizedKMeansHNSWMultiPivotEvaluator:
@@ -423,7 +871,7 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
 
     def _evaluate_pure_kmeans_from_shared(
         self, 
-        shared_system: SharedComputationSystem,
+        shared_system: 'SharedKMeansHNSWSystem',
         k: int, 
         ground_truth: Dict, 
         n_probe: int = 1
@@ -562,9 +1010,9 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
             try:
                 phase_records: List[Dict[str, Any]] = []
                 
-                # 🔄 创建共享计算系统 (一次性完成K-Means聚类)
+                # 🔄 创建共享计算系统 (一次性完成HNSW + K-Means聚类)
                 shared_computation_start = time.time()
-                shared_system = SharedComputationSystem(base_index, params, adaptive_config)
+                shared_system = SharedKMeansHNSWSystem(base_index, params, adaptive_config)
                 shared_computation_time = time.time() - shared_computation_start
                 
                 print(f"  📊 共享计算耗时: {shared_computation_time:.2f}秒 (包含向量提取 + K-Means聚类)")
