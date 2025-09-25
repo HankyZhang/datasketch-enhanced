@@ -1168,12 +1168,49 @@ if __name__ == "__main__":
                         choices=['line_perp_third', 'max_min_distance'],
                         help='枢纽选择策略')
     
+    # 自适应优化选项
+    parser.add_argument('--adaptive-k-children', action='store_true',
+                        help='启用基于平均聚类大小的自适应k_children')
+    parser.add_argument('--k-children-scale', type=float, default=1.5,
+                        help='自适应k_children的缩放因子 (默认: 1.5)')
+    parser.add_argument('--k-children-min', type=int, default=50,
+                        help='自适应时的最小k_children (默认: 50)')
+    parser.add_argument('--k-children-max', type=int, default=None,
+                        help='自适应时的最大k_children (可选)')
+    
+    # 多样化优化选项
+    parser.add_argument('--diversify-max-assignments', type=int, default=None,
+                        help='每个子节点的最大分配数，启用多样化 (可选)')
+    
+    # 修复优化选项
+    parser.add_argument('--repair-min-assignments', type=int, default=None,
+                        help='构建修复期间每个子节点的最小分配数 (可选)')
+    
+    # 性能调优选项
+    parser.add_argument('--child-search-ef', type=int, default=None,
+                        help='子节点搜索的ef参数 (默认: 自动计算)')
+    parser.add_argument('--overlap-sample', type=int, default=50,
+                        help='重叠统计的采样大小 (默认: 50)')
+    
     args = parser.parse_args()
 
     print("🚀 优化版K-Means HNSW + Multi-Pivot参数调优系统")
     print(f"📊 数据集: {args.dataset_size} vectors, 查询: {args.query_size}")
     print(f"🎯 Multi-Pivot: {'启用' if args.enable_multi_pivot else '禁用'}")
-    print("🔄 关键优化: 共享K-Means聚类计算，避免重复构建\n")
+    print("🔄 关键优化: 共享K-Means聚类计算，避免重复构建")
+    
+    # 显示启用的优化选项
+    optimizations = []
+    if args.adaptive_k_children:
+        optimizations.append(f"自适应k_children (scale={args.k_children_scale})")
+    if args.diversify_max_assignments:
+        optimizations.append(f"多样化限制 (max={args.diversify_max_assignments})")
+    if args.repair_min_assignments:
+        optimizations.append(f"修复机制 (min={args.repair_min_assignments})")
+    
+    if optimizations:
+        print(f"⚡ 启用的优化: {', '.join(optimizations)}")
+    print()
     
     # 创建合成数据
     print("🎲 创建合成数据...")
@@ -1207,7 +1244,7 @@ if __name__ == "__main__":
     param_grid = {
         'n_clusters': cluster_options,
         'k_children': [100],
-        'child_search_ef': [200]
+        'child_search_ef': [args.child_search_ef] if args.child_search_ef else [200]
     }
     
     evaluation_params = {
@@ -1218,12 +1255,13 @@ if __name__ == "__main__":
     }
     
     adaptive_config = {
-        'adaptive_k_children': False,
-        'k_children_scale': 1.5,
-        'k_children_min': 50,
-        'k_children_max': None,
-        'diversify_max_assignments': None,
-        'repair_min_assignments': None
+        'adaptive_k_children': args.adaptive_k_children,
+        'k_children_scale': args.k_children_scale,
+        'k_children_min': args.k_children_min,
+        'k_children_max': args.k_children_max,
+        'diversify_max_assignments': args.diversify_max_assignments,
+        'repair_min_assignments': args.repair_min_assignments,
+        'overlap_sample': args.overlap_sample
     }
     
     multi_pivot_config = {
