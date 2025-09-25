@@ -50,12 +50,15 @@ class KMeansHNSW:
         include_centroids_in_results: bool = False,
         diversify_max_assignments: Optional[int] = None,
         repair_min_assignments: Optional[int] = None,
-    overlap_sample: int = 50,
-    # --- Adaptive k_children controls ---
-    adaptive_k_children: bool = False,
-    k_children_scale: float = 1.5,
-    k_children_min: int = 100,
-    k_children_max: Optional[int] = None
+        overlap_sample: int = 50,
+        # --- Adaptive k_children controls ---
+        adaptive_k_children: bool = False,
+        k_children_scale: float = 1.5,
+        k_children_min: int = 100,
+        k_children_max: Optional[int] = None,
+        # --- Shared clustering support ---
+        shared_kmeans_model: Optional[MiniBatchKMeans] = None,
+        shared_dataset_vectors: Optional[np.ndarray] = None
     ):
         """
         Initialize the K-Means HNSW system.
@@ -115,6 +118,10 @@ class KMeansHNSW:
         self.diversify_max_assignments = diversify_max_assignments
         self.repair_min_assignments = repair_min_assignments
         self.overlap_sample = overlap_sample
+        
+        # Shared clustering support
+        self.shared_kmeans_model = shared_kmeans_model
+        self.shared_dataset_vectors = shared_dataset_vectors
         
         # Phase 2 components
         self.kmeans_model = None

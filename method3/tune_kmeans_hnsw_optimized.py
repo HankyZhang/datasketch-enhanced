@@ -1,6 +1,6 @@
 """
 优化版本的Multi-Pivot评估器 - 减少重复计算
-Optimized Multi-Pivot Evaluator - Reduce Redundant Computations
+
 
 主要优化：
 1. 共享基础HNSW向量提取
@@ -8,11 +8,6 @@ Optimized Multi-Pivot Evaluator - Reduce Redundant Computations
 3. 只在子节点分配策略上有所不同
 4. 复用已训练的聚类模型
 
-Key optimizations:
-1. Share base HNSW vector extraction
-2. Share K-Means clustering computation
-3. Only differ in child assignment strategy
-4. Reuse trained clustering models
 """
 
 import os
@@ -34,92 +29,9 @@ from hybrid_hnsw.hnsw_hybrid import HNSWHybrid
 from sklearn.cluster import MiniBatchKMeans
 
 
-class OptimizedBuildSystem:
-    """
-    优化构建系统 - 测量和报告构建时间的优化
-    Optimized Build System - Measure and report build time optimizations
-    """
-    
-    def __init__(
-        self,
-        base_index: HNSW,
-        params: Dict[str, Any],
-        adaptive_config: Dict[str, Any]
-    ):
-        self.base_index = base_index
-        self.params = params
-        self.adaptive_config = adaptive_config
-        
-        # 计时统计
-        self.single_pivot_build_time = 0.0
-        self.multi_pivot_build_time = 0.0
-        
-        print(f"  🔄 优化构建系统初始化 (n_clusters={self.params['n_clusters']})...")
-    
-    def create_single_pivot_system(self) -> KMeansHNSW:
-        """创建单枢纽系统，测量构建时间"""
-        print("    - 创建单枢纽KMeans HNSW系统...")
-        
-        start_time = time.time()
-        system = KMeansHNSW(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
-        )
-        self.single_pivot_build_time = time.time() - start_time
-        print(f"      ⏱️ 单枢纽构建时间: {self.single_pivot_build_time:.2f}秒")
-        
-        return system
-    
-    def create_multi_pivot_system(self, multi_pivot_config: Dict[str, Any]) -> KMeansHNSWMultiPivot:
-        """创建多枢纽系统，测量构建时间"""
-        print(f"    - 创建多枢纽KMeans HNSW系统 (pivots={multi_pivot_config.get('num_pivots', 3)})...")
-        
-        start_time = time.time()
-        system = KMeansHNSWMultiPivot(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            # Multi-pivot specific parameters
-            num_pivots=multi_pivot_config.get('num_pivots', 3),
-            pivot_selection_strategy=multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third'),
-            pivot_overquery_factor=multi_pivot_config.get('pivot_overquery_factor', 1.2),
-            multi_pivot_enabled=True,
-            store_pivot_debug=True,
-            # Adaptive/diversify/repair config
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
-        )
-        self.multi_pivot_build_time = time.time() - start_time
-        print(f"      ⏱️ 多枢纽构建时间: {self.multi_pivot_build_time:.2f}秒")
-        
-        return system
-    
-    def get_timing_summary(self) -> Dict[str, Any]:
-        """获取构建时间总结"""
-        total_time = self.single_pivot_build_time + self.multi_pivot_build_time
-        return {
-            'single_pivot_build_time': self.single_pivot_build_time,
-            'multi_pivot_build_time': self.multi_pivot_build_time, 
-            'total_build_time': total_time,
-            'optimization_note': '当前版本重点在于性能测量和对比分析'
-        }
-
 
 class SharedComputationSystem:
-    """管理K-Means HNSW的共享计算结果"""
+    """管理K-Means HNSW的共享计算结果 - 真正避免重复聚类计算"""
     
     def __init__(self, base_index: HNSW, params: Dict[str, Any], adaptive_config: Dict[str, Any]):
         """
@@ -137,17 +49,19 @@ class SharedComputationSystem:
         self.multi_pivot_build_time = 0.0
         
         # 执行共享的K-Means聚类计算
+        self.clustering_time = 0.0
         self._perform_shared_clustering()
         
         # 计算优化统计
         self.optimization_stats = {
+            'shared_clustering_time': self.clustering_time,
             'total_build_time': 0.0,
             'timing_comparison': {},
             'memory_usage': None
         }
     
     def _perform_shared_clustering(self):
-        """执行共享的K-Means聚类计算"""
+        """执行共享的K-Means聚类计算 - 只计算一次，供所有系统使用"""
         print("    📊 执行共享K-Means聚类计算...")
         start_time = time.time()
         
@@ -165,92 +79,434 @@ class SharedComputationSystem:
         if len(node_vectors) == 0:
             raise ValueError("无法从HNSW索引中提取向量数据")
         
-        self.node_vectors = np.array(node_vectors)
+        self.dataset_vectors = np.array(node_vectors)  # 重命名为更清晰的变量名
         
         # 执行K-Means聚类
         n_clusters = self.params['n_clusters']
-        actual_clusters = min(n_clusters, len(self.node_vectors))
+        actual_clusters = min(n_clusters, len(self.dataset_vectors))
         
-        self.kmeans_model = MiniBatchKMeans(
-            n_clusters=actual_clusters,
-            random_state=42,
-            max_iter=100,
-            batch_size=min(100, len(self.node_vectors))
-        )
+        # 使用与原始系统相同的K-Means参数
+        kmeans_params = {
+            'n_clusters': actual_clusters,
+            'random_state': 42,
+            'max_iter': 100,
+            'batch_size': min(1024, len(self.dataset_vectors)),
+            'tol': 1e-3,
+            'n_init': 3,
+            'init': 'k-means++',
+            'verbose': 0
+        }
         
-        self.cluster_labels = self.kmeans_model.fit_predict(self.node_vectors)
+        self.kmeans_model = MiniBatchKMeans(**kmeans_params)
+        self.cluster_labels = self.kmeans_model.fit_predict(self.dataset_vectors)
         self.centroids = self.kmeans_model.cluster_centers_
         
-        clustering_time = time.time() - start_time
-        print(f"      ✅ 聚类完成: {len(self.node_vectors)} vectors -> {actual_clusters} clusters ({clustering_time:.3f}s)")
+        self.clustering_time = time.time() - start_time
+        print(f"      ✅ 聚类完成: {len(self.dataset_vectors)} vectors -> {actual_clusters} clusters ({self.clustering_time:.3f}s)")
         
-        # 构建聚类映射
+        # 构建聚类映射和统计信息
         self.cluster_assignments = {}
         for i, (node_id, label) in enumerate(zip(self.node_ids, self.cluster_labels)):
             if label not in self.cluster_assignments:
                 self.cluster_assignments[label] = []
             self.cluster_assignments[label].append(node_id)
+        
+        # 构建聚类统计信息
+        cluster_sizes = np.bincount(self.cluster_labels, minlength=actual_clusters)
+        self.cluster_info = {
+            'avg_cluster_size': float(np.mean(cluster_sizes)),
+            'std_cluster_size': float(np.std(cluster_sizes)),
+            'min_cluster_size': int(np.min(cluster_sizes)),
+            'max_cluster_size': int(np.max(cluster_sizes)),
+            'inertia': float(self.kmeans_model.inertia_),
+            'n_iterations': int(getattr(self.kmeans_model, 'n_iter_', 0)),
+        }
     
-    def create_single_pivot_system(self) -> KMeansHNSW:
-        """创建单枢纽系统，测量构建时间"""
-        print("    - 创建单枢纽KMeans HNSW系统...")
+    def create_single_pivot_system(self):
+        """创建单枢纽系统，使用共享的聚类结果"""
+        print("    - 创建单枢纽KMeans HNSW系统 (使用共享聚类)...")
         
         start_time = time.time()
-        system = KMeansHNSW(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
+        system = OptimizedKMeansHNSW(
+            shared_system=self,
+            system_type='single_pivot'
         )
         self.single_pivot_build_time = time.time() - start_time
-        print(f"      ⏱️ 单枢纽构建时间: {self.single_pivot_build_time:.2f}秒")
+        print(f"      ⏱️ 单枢纽构建时间: {self.single_pivot_build_time:.2f}秒 (聚类时间已共享)")
         
         return system
     
-    def create_multi_pivot_system(self, multi_pivot_config: Dict[str, Any]) -> KMeansHNSWMultiPivot:
-        """创建多枢纽系统，测量构建时间"""
-        print(f"    - 创建多枢纽KMeans HNSW系统 (pivots={multi_pivot_config.get('num_pivots', 3)})...")
+    def create_multi_pivot_system(self, multi_pivot_config: Dict[str, Any]):
+        """创建多枢纽系统，使用共享的聚类结果"""
+        print(f"    - 创建多枢纽KMeans HNSW系统 (pivots={multi_pivot_config.get('num_pivots', 3)}, 使用共享聚类)...")
         
         start_time = time.time()
-        system = KMeansHNSWMultiPivot(
-            base_index=self.base_index,
-            n_clusters=self.params['n_clusters'],
-            k_children=self.params['k_children'],
-            child_search_ef=self.params.get('child_search_ef'),
-            # Multi-pivot specific parameters
-            num_pivots=multi_pivot_config.get('num_pivots', 3),
-            pivot_selection_strategy=multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third'),
-            pivot_overquery_factor=multi_pivot_config.get('pivot_overquery_factor', 1.2),
-            multi_pivot_enabled=True,
-            store_pivot_debug=True,
-            # Adaptive/diversify/repair config
-            adaptive_k_children=self.adaptive_config.get('adaptive_k_children', False),
-            k_children_scale=self.adaptive_config.get('k_children_scale', 1.5),
-            k_children_min=self.adaptive_config.get('k_children_min', 100),
-            k_children_max=self.adaptive_config.get('k_children_max'),
-            diversify_max_assignments=self.adaptive_config.get('diversify_max_assignments'),
-            repair_min_assignments=self.adaptive_config.get('repair_min_assignments')
+        system = OptimizedKMeansHNSW(
+            shared_system=self,
+            system_type='multi_pivot',
+            multi_pivot_config=multi_pivot_config
         )
         self.multi_pivot_build_time = time.time() - start_time
-        print(f"      ⏱️ 多枢纽构建时间: {self.multi_pivot_build_time:.2f}秒")
+        print(f"      ⏱️ 多枢纽构建时间: {self.multi_pivot_build_time:.2f}秒 (聚类时间已共享)")
         
         return system
     
     def get_timing_summary(self) -> Dict[str, Any]:
         """获取构建时间总结"""
-        total_time = self.single_pivot_build_time + self.multi_pivot_build_time
+        total_build_time = self.single_pivot_build_time + self.multi_pivot_build_time
+        total_time_with_clustering = total_build_time + self.clustering_time
         return {
+            'shared_clustering_time': self.clustering_time,
             'single_pivot_build_time': self.single_pivot_build_time,
             'multi_pivot_build_time': self.multi_pivot_build_time, 
-            'total_build_time': total_time,
-            'optimization_note': '当前版本重点在于性能测量和对比分析'
+            'total_build_time_without_clustering': total_build_time,
+            'total_time_with_shared_clustering': total_time_with_clustering,
+            'clustering_savings': '聚类计算仅执行一次，由两个系统共享使用',
+            'optimization_note': '通过共享K-Means聚类结果显著减少重复计算'
         }
+
+
+class OptimizedKMeansHNSW:
+    """
+    优化的K-Means HNSW系统 - 使用共享聚类结果
+    支持单枢纽和多枢纽两种模式，避免重复的K-Means计算
+    """
+    
+    def __init__(self, shared_system: SharedComputationSystem, system_type: str, multi_pivot_config: Optional[Dict[str, Any]] = None):
+        """
+        初始化优化的K-Means HNSW系统
+        
+        Args:
+            shared_system: 共享计算系统，包含预计算的聚类结果
+            system_type: 'single_pivot' 或 'multi_pivot'
+            multi_pivot_config: 多枢纽配置（仅当system_type='multi_pivot'时需要）
+        """
+        self.shared_system = shared_system
+        self.system_type = system_type
+        self.multi_pivot_config = multi_pivot_config or {}
+        
+        # 从共享系统获取基本信息
+        self.base_index = shared_system.base_index
+        self.params = shared_system.params
+        self.adaptive_config = shared_system.adaptive_config
+        
+        # 使用共享的聚类结果
+        self.kmeans_model = shared_system.kmeans_model
+        self.centroids = shared_system.centroids
+        self.cluster_labels = shared_system.cluster_labels
+        self.dataset_vectors = shared_system.dataset_vectors
+        self.node_ids = shared_system.node_ids
+        self.cluster_assignments = shared_system.cluster_assignments
+        
+        # 系统配置
+        self.n_clusters = len(self.centroids)
+        self.k_children = self.params['k_children']
+        self.distance_func = self.base_index._distance_func
+        
+        # 计算或调整k_children（自适应）
+        if self.adaptive_config.get('adaptive_k_children', False):
+            self._adjust_k_children()
+        
+        # 建立父子映射
+        self.parent_child_map = {}
+        self.child_vectors = {}
+        self.centroid_ids = [f"centroid_{i}" for i in range(self.n_clusters)]
+        
+        # 根据系统类型执行不同的子节点分配策略
+        if system_type == 'single_pivot':
+            self._assign_children_single_pivot()
+        elif system_type == 'multi_pivot':
+            self._assign_children_multi_pivot()
+        else:
+            raise ValueError(f"Unknown system_type: {system_type}")
+        
+        # 建立向量化的质心索引
+        self._build_centroid_index()
+        
+        # 统计信息
+        self.search_times = []
+        self.candidate_sizes = []
+        self.stats = self._initialize_stats()
+    
+    def _adjust_k_children(self):
+        """自适应调整k_children参数"""
+        avg_cluster_size = len(self.dataset_vectors) / max(1, self.n_clusters)
+        adaptive_value = int(avg_cluster_size * self.adaptive_config.get('k_children_scale', 1.5))
+        adaptive_value = max(self.adaptive_config.get('k_children_min', 100), adaptive_value)
+        k_children_max = self.adaptive_config.get('k_children_max')
+        if k_children_max is not None:
+            adaptive_value = min(k_children_max, adaptive_value)
+        
+        if adaptive_value != self.k_children:
+            print(f"      🔧 自适应k_children调整: {self.k_children} -> {adaptive_value}")
+            self.k_children = adaptive_value
+    
+    def _assign_children_single_pivot(self):
+        """单枢纽模式：为每个质心分配子节点"""
+        print("      📍 执行单枢纽子节点分配...")
+        child_search_ef = self.params.get('child_search_ef') or max(self.k_children + 50, int(self.k_children * 1.2))
+        
+        for i, centroid_id in enumerate(self.centroid_ids):
+            centroid_vector = self.centroids[i]
+            
+            # 使用HNSW搜索找到最近的子节点
+            neighbors = self.base_index.query(centroid_vector, k=self.k_children, ef=child_search_ef)
+            children = [node_id for node_id, _ in neighbors]
+            
+            self.parent_child_map[centroid_id] = children
+            for node_id in children:
+                self.child_vectors[node_id] = self.base_index[node_id]
+    
+    def _assign_children_multi_pivot(self):
+        """多枢纽模式：使用多个枢纽点为每个质心分配子节点"""
+        print("      📍 执行多枢纽子节点分配...")
+        
+        num_pivots = self.multi_pivot_config.get('num_pivots', 3)
+        pivot_strategy = self.multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third')
+        overquery_factor = self.multi_pivot_config.get('pivot_overquery_factor', 1.2)
+        child_search_ef = self.params.get('child_search_ef') or max(self.k_children + 50, int(self.k_children * 1.2))
+        
+        k_each_query = max(self.k_children, int(self.k_children * overquery_factor))
+        eps = 1e-12
+        
+        for idx_c, centroid_id in enumerate(self.centroid_ids):
+            A_vec = self.centroids[idx_c]
+            pivots = [A_vec]
+            
+            # 收集所有枢纽的查询结果
+            neighbors_sets = []
+            
+            # 第一个枢纽：质心本身
+            neighbors_A = self.base_index.query(A_vec, k=k_each_query, ef=child_search_ef)
+            S_A = [nid for nid, _ in neighbors_A]
+            neighbors_sets.append(S_A)
+            
+            # 为所有找到的节点建立向量映射
+            for nid in S_A:
+                self.child_vectors[nid] = self.base_index[nid]
+            
+            # 如果只需要一个枢纽，直接使用质心结果
+            if num_pivots == 1:
+                selected = S_A[:self.k_children]
+                self.parent_child_map[centroid_id] = selected
+                continue
+            
+            # 选择其他枢纽点
+            for p_idx in range(1, num_pivots):
+                union_candidates = list({nid for s in neighbors_sets for nid in s})
+                if not union_candidates:
+                    break
+                
+                if p_idx == 1:
+                    # B: 距离A最远的点
+                    chosen_id, chosen_vec = self._find_farthest_from_point(A_vec, S_A)
+                elif p_idx == 2 and pivot_strategy == 'line_perp_third':
+                    # C: 到AB线垂直距离最大的点
+                    B_vec = pivots[1]
+                    chosen_id, chosen_vec = self._find_max_perpendicular_distance(A_vec, B_vec, union_candidates, eps)
+                else:
+                    # 其他枢纽：使用max-min距离策略
+                    chosen_id, chosen_vec = self._find_max_min_distance(pivots, union_candidates)
+                
+                if chosen_vec is not None:
+                    pivots.append(chosen_vec)
+                    
+                    # 查询新枢纽点的邻居
+                    neighbors_new = self.base_index.query(chosen_vec, k=k_each_query, ef=child_search_ef)
+                    S_new = [nid for nid, _ in neighbors_new]
+                    for nid in S_new:
+                        self.child_vectors[nid] = self.base_index[nid]
+                    neighbors_sets.append(S_new)
+            
+            # 统一所有候选者并按到任意枢纽的最小距离排序
+            union_ids = list({nid for s in neighbors_sets for nid in s})
+            scores = []
+            for nid in union_ids:
+                vec = self.child_vectors[nid]
+                d_min = min(self.distance_func(vec, pv) for pv in pivots)
+                scores.append((d_min, nid))
+            
+            scores.sort()
+            selected = [nid for _, nid in scores[:self.k_children]]
+            self.parent_child_map[centroid_id] = selected
+    
+    def _find_farthest_from_point(self, point: np.ndarray, candidates: List[str]) -> Tuple[str, np.ndarray]:
+        """找到距离指定点最远的候选点"""
+        max_dist = -1.0
+        farthest_id = candidates[0] if candidates else None
+        farthest_vec = None
+        
+        for nid in candidates:
+            vec = self.base_index[nid]
+            dist = self.distance_func(point, vec)
+            if dist > max_dist:
+                max_dist = dist
+                farthest_id = nid
+                farthest_vec = vec
+        
+        return farthest_id, farthest_vec
+    
+    def _find_max_perpendicular_distance(self, A: np.ndarray, B: np.ndarray, candidates: List[str], eps: float) -> Tuple[str, np.ndarray]:
+        """找到到AB线垂直距离最大的点"""
+        v = B - A
+        v_norm_sq = float(np.dot(v, v))
+        
+        if v_norm_sq < eps:
+            # 如果A和B太接近，退回到距离A最远的策略
+            return self._find_farthest_from_point(A, candidates)
+        
+        max_perp = -1.0
+        best_id = candidates[0] if candidates else None
+        best_vec = None
+        
+        for nid in candidates:
+            vec = self.base_index[nid]
+            u = vec - A
+            proj_length = np.dot(u, v) / v_norm_sq
+            proj = A + proj_length * v
+            perp_dist = np.linalg.norm(vec - proj)
+            
+            if perp_dist > max_perp:
+                max_perp = perp_dist
+                best_id = nid
+                best_vec = vec
+        
+        return best_id, best_vec
+    
+    def _find_max_min_distance(self, pivots: List[np.ndarray], candidates: List[str]) -> Tuple[str, np.ndarray]:
+        """使用max-min距离策略选择下一个枢纽点"""
+        best_score = -1.0
+        best_id = None
+        best_vec = None
+        
+        for nid in candidates:
+            vec = self.base_index[nid]
+            min_dist = min(self.distance_func(vec, pv) for pv in pivots)
+            if min_dist > best_score:
+                best_score = min_dist
+                best_id = nid
+                best_vec = vec
+        
+        return best_id, best_vec
+    
+    def _build_centroid_index(self):
+        """建立向量化的质心索引以提升搜索速度"""
+        self._centroid_matrix = self.centroids.copy()
+        self._centroid_id_array = np.array(self.centroid_ids)
+    
+    def _initialize_stats(self) -> Dict[str, Any]:
+        """初始化统计信息"""
+        return {
+            'system_type': self.system_type,
+            'n_clusters': self.n_clusters,
+            'k_children': self.k_children,
+            'num_children': len(self.child_vectors),
+            'avg_children_per_centroid': len(self.child_vectors) / self.n_clusters if self.n_clusters > 0 else 0.0,
+            'shared_clustering': True,
+            'multi_pivot_config': self.multi_pivot_config if self.system_type == 'multi_pivot' else None,
+            'avg_search_time_ms': 0.0,
+            'avg_candidate_size': 0.0
+        }
+    
+    def search(self, query_vector: np.ndarray, k: int = 10, n_probe: int = 10) -> List[Tuple[str, float]]:
+        """
+        执行两阶段搜索：质心搜索 -> 子节点搜索
+        
+        Args:
+            query_vector: 查询向量
+            k: 返回的结果数量
+            n_probe: 探测的质心数量
+            
+        Returns:
+            排序后的(node_id, distance)元组列表
+        """
+        start_time = time.time()
+        
+        # 阶段1：找到最近的质心
+        closest_centroids = self._stage1_centroid_search(query_vector, n_probe)
+        
+        # 阶段2：在选中的质心的子节点中搜索
+        results = self._stage2_child_search(query_vector, closest_centroids, k)
+        
+        # 记录时间统计
+        elapsed = (time.time() - start_time) * 1000.0
+        self.search_times.append(elapsed)
+        self.stats['avg_search_time_ms'] = float(np.mean(self.search_times))
+        
+        return results
+    
+    def _stage1_centroid_search(self, query_vector: np.ndarray, n_probe: int) -> List[Tuple[str, float]]:
+        """阶段1：找到最近的K-Means质心"""
+        if self._centroid_matrix is not None:
+            # 向量化计算
+            diffs = self._centroid_matrix - query_vector
+            distances = np.linalg.norm(diffs, axis=1)
+            indices = np.argsort(distances)[:n_probe]
+            return [(self.centroid_ids[i], distances[i]) for i in indices]
+        else:
+            # 回退到循环计算
+            centroid_distances = []
+            for i, centroid_vector in enumerate(self.centroids):
+                distance = self.distance_func(query_vector, centroid_vector)
+                centroid_distances.append((distance, self.centroid_ids[i]))
+            centroid_distances.sort()
+            return [(cid, dist) for dist, cid in centroid_distances[:n_probe]]
+    
+    def _stage2_child_search(self, query_vector: np.ndarray, closest_centroids: List[Tuple[str, float]], k: int) -> List[Tuple[str, float]]:
+        """阶段2：在选中质心的子节点中搜索"""
+        # 收集所有候选子节点
+        candidate_children = set()
+        for centroid_id, _ in closest_centroids:
+            children = self.parent_child_map.get(centroid_id, [])
+            candidate_children.update(children)
+        
+        if not candidate_children:
+            return []
+        
+        # 计算到所有候选者的距离
+        candidate_ids = list(candidate_children)
+        vectors = []
+        valid_ids = []
+        
+        for cid in candidate_ids:
+            if cid in self.child_vectors:
+                vectors.append(self.child_vectors[cid])
+                valid_ids.append(cid)
+        
+        if not vectors:
+            return []
+        
+        # 向量化距离计算
+        candidate_matrix = np.vstack(vectors)
+        diffs = candidate_matrix - query_vector
+        distances = np.linalg.norm(diffs, axis=1)
+        
+        # 获取top-k结果
+        indices = np.argsort(distances)[:k]
+        results = [(valid_ids[i], distances[i]) for i in indices]
+        
+        # 记录候选数量统计
+        self.candidate_sizes.append(len(valid_ids))
+        self.stats['avg_candidate_size'] = float(np.mean(self.candidate_sizes))
+        
+        return results
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取系统统计信息"""
+        # 更新动态统计
+        self.stats['num_children'] = len(self.child_vectors)
+        self.stats['avg_children_per_centroid'] = len(self.child_vectors) / self.n_clusters if self.n_clusters > 0 else 0.0
+        
+        # 添加K-Means统计
+        stats = self.stats.copy()
+        stats.update({
+            'kmeans_inertia': float(self.shared_system.kmeans_model.inertia_),
+            'kmeans_iterations': int(getattr(self.shared_system.kmeans_model, 'n_iter_', 0)),
+            'cluster_size_stats': self.shared_system.cluster_info,
+            'shared_clustering_time': self.shared_system.clustering_time
+        })
+        
+        return stats
 
 
 class OptimizedKMeansHNSWMultiPivotEvaluator:
