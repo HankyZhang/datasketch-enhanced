@@ -178,6 +178,8 @@ class SharedKMeansHNSWSystem:
             raise ValueError("无法从HNSW索引中提取向量数据")
         
         self.node_vectors = np.array(node_vectors)
+        # 添加别名以保持向后兼容性
+        self.dataset_vectors = self.node_vectors
         
         # 构建ID到索引的映射
         self.node_id_to_idx = {node_id: i for i, node_id in enumerate(self.node_ids)}
@@ -214,7 +216,7 @@ class SharedKMeansHNSWSystem:
         self.child_vectors = {}
         for node_id in self.node_ids:
             idx = self.node_id_to_idx[node_id] 
-            self.child_vectors[node_id] = self.node_vectors[idx]
+            self.child_vectors[node_id] = self.dataset_vectors[idx]
         
         # 向量化查找矩阵
         self._centroid_matrix = self.centroids.copy()
@@ -276,7 +278,7 @@ class OptimizedSinglePivotSystem:
         self.cluster_assignments = shared_system.cluster_assignments
         self.child_vectors = shared_system.child_vectors.copy()
         self.n_clusters = shared_system.n_clusters
-        self.node_vectors = shared_system.node_vectors
+        # 不再创建node_vectors副本，直接使用shared_system的引用
         self.node_ids = shared_system.node_ids
         
         # 构建父子节点映射 - 单枢纽策略
@@ -322,7 +324,7 @@ class OptimizedSinglePivotSystem:
                 for child_id in children:
                     if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
                         idx = self.shared_system.node_id_to_idx[child_id]
-                        self.child_vectors[child_id] = self.node_vectors[idx]
+                        self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
                         
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的子节点查找失败: {e}")
@@ -420,7 +422,7 @@ class OptimizedMultiPivotSystem:
         self.cluster_assignments = shared_system.cluster_assignments
         self.child_vectors = shared_system.child_vectors.copy()
         self.n_clusters = shared_system.n_clusters
-        self.node_vectors = shared_system.node_vectors
+        # 不再创建node_vectors副本，直接使用shared_system的引用
         self.node_ids = shared_system.node_ids
         
         # 多枢纽参数
@@ -483,7 +485,7 @@ class OptimizedMultiPivotSystem:
                 for child_id in children:
                     if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
                         idx = self.shared_system.node_id_to_idx[child_id]
-                        self.child_vectors[child_id] = self.node_vectors[idx]
+                        self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
                         
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的多枢纽子节点查找失败: {e}")
@@ -515,7 +517,7 @@ class OptimizedMultiPivotSystem:
             for cid in candidate_ids:
                 if cid in self.shared_system.node_id_to_idx:
                     idx = self.shared_system.node_id_to_idx[cid]
-                    candidate_vectors.append(self.node_vectors[idx])
+                    candidate_vectors.append(self.shared_system.dataset_vectors[idx])
                     valid_candidate_ids.append(cid)
             
             if len(candidate_vectors) < 2:
@@ -613,7 +615,7 @@ class OptimizedMultiPivotSystem:
             for cid in candidate_ids:
                 if cid in self.shared_system.node_id_to_idx:
                     idx = self.shared_system.node_id_to_idx[cid]
-                    candidate_vectors.append(self.node_vectors[idx])
+                    candidate_vectors.append(self.shared_system.dataset_vectors[idx])
                     valid_ids.append(cid)
             
             if len(candidate_vectors) <= k_children:
