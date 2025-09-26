@@ -22,6 +22,7 @@ import json
 import argparse
 import random
 import numpy as np
+import re
 from typing import Dict, List, Tuple, Optional, Any, Hashable
 from itertools import product
 from collections import defaultdict
@@ -33,6 +34,43 @@ from method3.kmeans_hnsw_multi_pivot import KMeansHNSWMultiPivot
 from hnsw.hnsw import HNSW
 from hybrid_hnsw.hnsw_hybrid import HNSWHybrid
 from sklearn.cluster import MiniBatchKMeans
+
+# --------------------------------------
+# 公共工具函数: 统计父子映射的分配情况 (去重/重复/覆盖率)
+# --------------------------------------
+def compute_assignment_stats(parent_child_map: Dict[Hashable, List[Hashable]], base_index) -> Dict[str, Any]:
+    try:
+        all_assigned_nodes: set = set()
+        total_assignments = 0
+        duplicate_assignments = 0
+        for _parent, children in parent_child_map.items():
+            for child_id in children:
+                total_assignments += 1
+                if child_id in all_assigned_nodes:
+                    duplicate_assignments += 1
+                else:
+                    all_assigned_nodes.add(child_id)
+        unique_nodes = len(all_assigned_nodes)
+        total_base_nodes = len(base_index)
+        coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
+        duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
+        return {
+            'total_assignments': total_assignments,
+            'unique_assigned_nodes': unique_nodes,
+            'duplicate_assignments': duplicate_assignments,
+            'duplication_rate': duplication_rate,
+            'coverage_fraction': coverage_fraction,
+            'total_base_nodes': total_base_nodes
+        }
+    except Exception:
+        return {
+            'total_assignments': 0,
+            'unique_assigned_nodes': 0,
+            'duplicate_assignments': 0,
+            'duplication_rate': 0.0,
+            'coverage_fraction': 0.0,
+            'total_base_nodes': len(base_index) if base_index is not None else 0
+        }
 
 
 
@@ -118,6 +156,23 @@ class SharedKMeansHNSWSystem:
         self.cluster_labels = self.kmeans_model.fit_predict(self.node_vectors)
         self.centroids = self.kmeans_model.cluster_centers_
         self.n_clusters = actual_clusters
+
+        # 自适应k_children逻辑集中在共享层
+        if self.adaptive_config.get('adaptive_k_children'):
+            avg_cluster_size = len(self.node_vectors) / max(1, actual_clusters)
+            scale = self.adaptive_config.get('k_children_scale', 1.5)
+            k_min = self.adaptive_config.get('k_children_min', 50)
+            k_max = self.adaptive_config.get('k_children_max')
+            adaptive_k = int(avg_cluster_size * scale)
+            if adaptive_k < k_min:
+                adaptive_k = k_min
+            if k_max is not None and adaptive_k > k_max:
+                adaptive_k = k_max
+            original_k = self.params.get('k_children')
+            self.params['k_children'] = adaptive_k
+            print(f"      🔧 自适应k_children: 原始={original_k} -> 计算={adaptive_k} (平均聚类大小={avg_cluster_size:.1f})")
+            # 记录在adaptive_config中以便下游引用
+            self.adaptive_config['computed_k_children'] = adaptive_k
         
     def _build_shared_lookup_structures(self):
         """构建共享的查找结构"""
@@ -199,78 +254,73 @@ class OptimizedSinglePivotSystem:
         self.n_clusters = shared_system.n_clusters
         # 不再创建node_vectors副本，直接使用shared_system的引用
         self.node_ids = shared_system.node_ids
-        
-        # 构建父子节点映射 - 单枢纽策略
-        self._build_single_pivot_parent_child_mapping()
-        
-        # 向量化查找矩阵 (复用共享系统的)
-        self._centroid_matrix = shared_system._centroid_matrix
-        self._centroid_id_array = shared_system._centroid_id_array
-        
-        # 统计信息
+        # 统计信息需在构建前先占位，构建完成再补充
         self.stats = {
             'method': 'single_pivot_optimized',
             'n_clusters': self.n_clusters,
-            'num_children': len(self.child_vectors),
             'reused_shared_clustering': True
         }
         self.search_times = []
+
+        # 构建父子节点映射 - 单枢纽策略
+        self._build_single_pivot_parent_child_mapping()
+
+        # 构建后更新子节点数量
+        self.stats['num_children'] = len(self.child_vectors)
+
+        # 向量化查找矩阵 (复用共享系统的)
+        self._centroid_matrix = shared_system._centroid_matrix
+        self._centroid_id_array = shared_system._centroid_id_array
     
     def _build_single_pivot_parent_child_mapping(self):
-        """构建单枢纽的父子节点映射"""
+        """构建单枢纽的父子节点映射 (包含修复前后统计)"""
         print("      📍 构建单枢纽父子节点映射...")
-        
+
         k_children = self.shared_system.params['k_children']
         child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
-        
-        # 检查是否需要计算分配统计（用于diversify或repair）
+
         need_counts = (self.adaptive_config.get('diversify_max_assignments') is not None) or \
-                     (self.adaptive_config.get('repair_min_assignments') is not None)
-        assignment_counts = {} if need_counts else None
-        
-        self.parent_child_map = {}
-        
+                      (self.adaptive_config.get('repair_min_assignments') is not None)
+        assignment_counts: Dict[Hashable, int] = {} if need_counts else {}
+
+        self.parent_child_map: Dict[Hashable, List[Hashable]] = {}
+
         for cluster_idx, centroid_id in enumerate(self.centroid_ids):
-            # 使用质心作为单一枢纽点
             centroid_vector = self.centroids[cluster_idx]
-            
-            # 使用HNSW搜索找到最近的k_children个节点
             try:
-                hnsw_results = self.base_index.query(
-                    centroid_vector, 
-                    k=k_children, 
-                    ef=child_search_ef
-                )
+                hnsw_results = self.base_index.query(centroid_vector, k=k_children, ef=child_search_ef)
                 children = [node_id for node_id, _ in hnsw_results]
-                
-                # Apply diversify filter if enabled
+
                 if self.adaptive_config.get('diversify_max_assignments') is not None:
-                    children = self._apply_diversify_filter(
-                        children, assignment_counts, 
-                        self.adaptive_config['diversify_max_assignments']
-                    )
-                
+                    children = self._apply_diversify_filter(children, assignment_counts,
+                                                            self.adaptive_config['diversify_max_assignments'])
+
                 self.parent_child_map[centroid_id] = children
-                
-                # Update assignment counts
+
                 if need_counts:
                     for child_id in children:
                         assignment_counts[child_id] = assignment_counts.get(child_id, 0) + 1
-                
-                # 确保子节点向量在child_vectors中
+
                 for child_id in children:
                     if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
                         idx = self.shared_system.node_id_to_idx[child_id]
                         self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
-                        
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的子节点查找失败: {e}")
                 self.parent_child_map[centroid_id] = []
-        
-        # Apply repair phase if enabled
+
+        pre_stats = self._compute_detailed_node_stats()
         if self.adaptive_config.get('repair_min_assignments') is not None:
             self._repair_child_assignments(assignment_counts)
-        
+            post_stats = self._compute_detailed_node_stats()
+        else:
+            post_stats = pre_stats
+
+        self.pre_repair_stats = pre_stats
+        self.post_repair_stats = post_stats
+        self.stats['before_repair'] = pre_stats
+        self.stats['after_repair'] = post_stats
+
         total_children = sum(len(children) for children in self.parent_child_map.values())
         avg_children = total_children / max(1, len(self.parent_child_map))
         print(f"      ✅ 单枢纽映射完成: {total_children} 个子节点, 平均 {avg_children:.1f} 个/质心")
@@ -416,36 +466,15 @@ class OptimizedSinglePivotSystem:
         # 添加详细的节点统计信息
         node_stats = self._compute_detailed_node_stats()
         stats.update(node_stats)
+        # 保留前后修复快照
+        if 'before_repair' not in stats and hasattr(self, 'pre_repair_stats'):
+            stats['before_repair'] = self.pre_repair_stats
+        if 'after_repair' not in stats and hasattr(self, 'post_repair_stats'):
+            stats['after_repair'] = self.post_repair_stats
         return stats
     
     def _compute_detailed_node_stats(self) -> Dict[str, Any]:
-        """计算详细的节点分配统计"""
-        # 统计总分配数和去重节点数
-        all_assigned_nodes = set()
-        total_assignments = 0
-        duplicate_assignments = 0
-        
-        for centroid_id, children in self.parent_child_map.items():
-            for child_id in children:
-                total_assignments += 1
-                if child_id in all_assigned_nodes:
-                    duplicate_assignments += 1
-                else:
-                    all_assigned_nodes.add(child_id)
-        
-        unique_nodes = len(all_assigned_nodes)
-        total_base_nodes = len(self.base_index)
-        coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
-        duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
-        
-        return {
-            'total_assignments': total_assignments,
-            'unique_assigned_nodes': unique_nodes,
-            'duplicate_assignments': duplicate_assignments,
-            'duplication_rate': duplication_rate,
-            'coverage_fraction': coverage_fraction,
-            'total_base_nodes': total_base_nodes
-        }
+        return compute_assignment_stats(self.parent_child_map, self.base_index)
 
 
 class OptimizedMultiPivotSystem:
@@ -480,70 +509,64 @@ class OptimizedMultiPivotSystem:
         self.pivot_selection_strategy = multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third')
         self.pivot_overquery_factor = multi_pivot_config.get('pivot_overquery_factor', 1.2)
         
-        # 构建父子节点映射 - 多枢纽策略
-        self._build_multi_pivot_parent_child_mapping()
-        
-        # 向量化查找矩阵 (复用共享系统的)
-        self._centroid_matrix = shared_system._centroid_matrix
-        self._centroid_id_array = shared_system._centroid_id_array
-        
-        # 统计信息
+        # 统计信息占位，映射构建后补充 num_children
         self.stats = {
             'method': 'multi_pivot_optimized',
             'n_clusters': self.n_clusters,
-            'num_children': len(self.child_vectors),
             'num_pivots': self.num_pivots,
             'pivot_strategy': self.pivot_selection_strategy,
             'reused_shared_clustering': True
         }
         self.search_times = []
+
+        # 构建父子节点映射 - 多枢纽策略
+        self._build_multi_pivot_parent_child_mapping()
+
+        # 更新子节点数量
+        self.stats['num_children'] = len(self.child_vectors)
+
+        # 向量化查找矩阵 (复用共享系统的)
+        self._centroid_matrix = shared_system._centroid_matrix
+        self._centroid_id_array = shared_system._centroid_id_array
     
     def _build_multi_pivot_parent_child_mapping(self):
-        """构建多枢纽的父子节点映射"""
+        """构建多枢纽的父子节点映射 (包含前后统计)"""
         print(f"      🎯 构建多枢纽父子节点映射 (pivots={self.num_pivots})...")
-        
+
         k_children = self.shared_system.params['k_children']
         child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
         overquery_k = int(k_children * self.pivot_overquery_factor)
-        
-        self.parent_child_map = {}
-        
+
+        self.parent_child_map: Dict[Hashable, List[Hashable]] = {}
+
         for cluster_idx, centroid_id in enumerate(self.centroid_ids):
             try:
-                # 获取多个枢纽点
                 pivots = self._select_pivots_for_centroid(cluster_idx, overquery_k, child_search_ef)
-                
-                # 对每个枢纽点进行查询并合并结果
-                all_candidates = set()
+                all_candidates: set = set()
                 for pivot_vector in pivots:
-                    hnsw_results = self.base_index.query(
-                        pivot_vector, 
-                        k=overquery_k, 
-                        ef=child_search_ef
-                    )
+                    hnsw_results = self.base_index.query(pivot_vector, k=overquery_k, ef=child_search_ef)
                     for node_id, _ in hnsw_results:
                         all_candidates.add(node_id)
-                
-                # 计算所有候选点到各枢纽的距离，选择最优的k_children个
-                children = self._select_best_children_from_candidates(
-                    list(all_candidates), pivots, k_children
-                )
-                
+
+                children = self._select_best_children_from_candidates(list(all_candidates), pivots, k_children)
                 self.parent_child_map[centroid_id] = children
-                
-                # 确保子节点向量在child_vectors中
+
                 for child_id in children:
                     if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
                         idx = self.shared_system.node_id_to_idx[child_id]
                         self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
-                        
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的多枢纽子节点查找失败: {e}")
                 self.parent_child_map[centroid_id] = []
-        
+
         total_children = sum(len(children) for children in self.parent_child_map.values())
         avg_children = total_children / max(1, len(self.parent_child_map))
         print(f"      ✅ 多枢纽映射完成: {total_children} 个子节点, 平均 {avg_children:.1f} 个/质心")
+        snapshot = self._compute_detailed_node_stats()
+        self.pre_repair_stats = snapshot
+        self.post_repair_stats = snapshot
+        self.stats['before_repair'] = snapshot
+        self.stats['after_repair'] = snapshot
     
     def _select_pivots_for_centroid(self, cluster_idx: int, overquery_k: int, child_search_ef: int) -> List[np.ndarray]:
         """为质心选择多个枢纽点"""
@@ -754,36 +777,14 @@ class OptimizedMultiPivotSystem:
         # 添加详细的节点统计信息
         node_stats = self._compute_detailed_node_stats()
         stats.update(node_stats)
+        if 'before_repair' not in stats and hasattr(self, 'pre_repair_stats'):
+            stats['before_repair'] = self.pre_repair_stats
+        if 'after_repair' not in stats and hasattr(self, 'post_repair_stats'):
+            stats['after_repair'] = self.post_repair_stats
         return stats
     
     def _compute_detailed_node_stats(self) -> Dict[str, Any]:
-        """计算详细的节点分配统计"""
-        # 统计总分配数和去重节点数
-        all_assigned_nodes = set()
-        total_assignments = 0
-        duplicate_assignments = 0
-        
-        for centroid_id, children in self.parent_child_map.items():
-            for child_id in children:
-                total_assignments += 1
-                if child_id in all_assigned_nodes:
-                    duplicate_assignments += 1
-                else:
-                    all_assigned_nodes.add(child_id)
-        
-        unique_nodes = len(all_assigned_nodes)
-        total_base_nodes = len(self.base_index)
-        coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
-        duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
-        
-        return {
-            'total_assignments': total_assignments,
-            'unique_assigned_nodes': unique_nodes,
-            'duplicate_assignments': duplicate_assignments,
-            'duplication_rate': duplication_rate,
-            'coverage_fraction': coverage_fraction,
-            'total_base_nodes': total_base_nodes
-        }
+        return compute_assignment_stats(self.parent_child_map, self.base_index)
 
 
 class OptimizedKMeansHNSWMultiPivotEvaluator:
@@ -928,6 +929,14 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
             individual_recall = correct / k if k > 0 else 0.0
             individual_recalls.append(individual_recall)
         
+        coverage_stats = {
+            'total_assignments': None,
+            'unique_assigned_nodes': len(base_index),
+            'duplicate_assignments': 0,
+            'duplication_rate': 0.0,
+            'coverage_fraction': 1.0,
+            'total_base_nodes': len(base_index)
+        }
         return {
             'phase': 'baseline_hnsw',
             'ef': ef,
@@ -938,7 +947,9 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
             'total_expected': total_expected,
             'individual_recalls': individual_recalls,
             'avg_individual_recall': float(np.mean(individual_recalls)),
-            'std_individual_recall': float(np.std(individual_recalls))
+            'std_individual_recall': float(np.std(individual_recalls)),
+            'before_repair': coverage_stats,
+            'after_repair': coverage_stats
         }
 
     def evaluate_hybrid_hnsw(
@@ -961,50 +972,9 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
         return result
     
     def _compute_hybrid_node_stats(self, hybrid_index) -> Dict[str, Any]:
-        """计算 HybridHNSW 的节点统计"""
-        try:
-            # 获取父子映射
-            parent_child_map = getattr(hybrid_index, 'parent_child_map', {})
-            base_index = getattr(hybrid_index, 'base_index', None)
-            
-            if not parent_child_map or not base_index:
-                return {
-                    'total_assignments': 0,
-                    'unique_assigned_nodes': 0,
-                    'duplicate_assignments': 0,
-                    'duplication_rate': 0.0,
-                    'coverage_fraction': 0.0,
-                    'total_base_nodes': 0
-                }
-            
-            # 统计总分配数和去重节点数
-            all_assigned_nodes = set()
-            total_assignments = 0
-            duplicate_assignments = 0
-            
-            for parent_id, children in parent_child_map.items():
-                for child_id in children:
-                    total_assignments += 1
-                    if child_id in all_assigned_nodes:
-                        duplicate_assignments += 1
-                    else:
-                        all_assigned_nodes.add(child_id)
-            
-            unique_nodes = len(all_assigned_nodes)
-            total_base_nodes = len(base_index)
-            coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
-            duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
-            
-            return {
-                'total_assignments': total_assignments,
-                'unique_assigned_nodes': unique_nodes,
-                'duplicate_assignments': duplicate_assignments,
-                'duplication_rate': duplication_rate,
-                'coverage_fraction': coverage_fraction,
-                'total_base_nodes': total_base_nodes
-            }
-        except Exception as e:
-            print(f"Warning: Could not compute hybrid node stats: {e}")
+        parent_child_map = getattr(hybrid_index, 'parent_child_map', {})
+        base_index = getattr(hybrid_index, 'base_index', None)
+        if not parent_child_map or not base_index:
             return {
                 'total_assignments': 0,
                 'unique_assigned_nodes': 0,
@@ -1013,6 +983,7 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                 'coverage_fraction': 0.0,
                 'total_base_nodes': 0
             }
+        return compute_assignment_stats(parent_child_map, base_index)
 
     def _evaluate_pure_kmeans_from_shared(
         self, 
@@ -1077,6 +1048,14 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
             total_correct += correct
             individual_recalls.append(correct / k if k > 0 else 0.0)
         
+        coverage_stats = {
+            'total_assignments': None,  # 纯KMeans无父子多重分配概念
+            'unique_assigned_nodes': len(shared_system.node_vectors),
+            'duplicate_assignments': 0,
+            'duplication_rate': 0.0,
+            'coverage_fraction': 1.0,
+            'total_base_nodes': len(shared_system.node_vectors)
+        }
         return {
             'method': 'pure_kmeans_from_shared',
             'recall_at_k': total_correct / total_expected if total_expected > 0 else 0.0,
@@ -1091,7 +1070,9 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
             'n_clusters': n_clusters,
             'n_probe': n_probe_eff,
             'k': k,
-            'reused_shared_clustering': True
+            'reused_shared_clustering': True,
+            'before_repair': coverage_stats,
+            'after_repair': coverage_stats
         }
 
     def optimized_parameter_sweep(
@@ -1153,7 +1134,8 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
             print(f"Parameters: {params}")
 
             try:
-                phase_records: List[Dict[str, Any]] = []
+                phase_records: List[Dict[str, Any]] = []  # 保留原始逐阶段记录
+                unified_methods: Dict[str, Dict[str, Any]] = {}
                 
                 # 🔄 创建共享计算系统 (一次性完成HNSW + K-Means聚类)
                 shared_computation_start = time.time()
@@ -1162,14 +1144,27 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                 
                 print(f"  📊 共享计算耗时: {shared_computation_time:.2f}秒 (包含向量提取 + K-Means聚类)")
 
-                # Phase 1: 基线HNSW (无变化)
+                # Phase 1: 基线HNSW
                 base_ef = base_index._ef_construction
                 for k in k_values:
                     b_eval = self.evaluate_hnsw_baseline(base_index, k, base_ef, ground_truths[k])
                     phase_records.append({**b_eval, 'k': k})
+                    method_key = f"hnsw_baseline_k{k}"
+                    unified_methods[method_key] = {
+                        'method': 'hnsw_baseline',
+                        'k': k,
+                        'params': {'ef': base_ef},
+                        'recall': b_eval['recall_at_k'],
+                        'timing': {
+                            'avg_query_time_ms': b_eval['avg_query_time_ms'],
+                            'std_query_time_ms': b_eval['std_query_time_ms']
+                        },
+                        'before_repair': b_eval['before_repair'],
+                        'after_repair': b_eval['after_repair']
+                    }
                     print(f"  [基线HNSW] k={k} recall={b_eval['recall_at_k']:.4f}")
 
-                # Phase 2: 纯K-Means (使用共享聚类结果)
+                # Phase 2: 纯K-Means (共享聚类)
                 for k in k_values:
                     for n_probe in n_probe_values:
                         c_eval = self._evaluate_pure_kmeans_from_shared(
@@ -1177,9 +1172,25 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                         )
                         c_eval['phase'] = 'clusters_only'
                         phase_records.append({**c_eval, 'k': k})
+                        method_key = f"pure_kmeans_k{k}_np{n_probe}"
+                        unified_methods[method_key] = {
+                            'method': 'pure_kmeans',
+                            'k': k,
+                            'params': {
+                                'n_probe': n_probe,
+                                'n_clusters': shared_system.params['n_clusters']
+                            },
+                            'recall': c_eval['recall_at_k'],
+                            'timing': {
+                                'avg_query_time_ms': c_eval['avg_query_time_ms'],
+                                'std_query_time_ms': c_eval['std_query_time_ms']
+                            },
+                            'before_repair': c_eval['before_repair'],
+                            'after_repair': c_eval['after_repair']
+                        }
                         print(f"  [纯K-Means] k={k} n_probe={n_probe} recall={c_eval['recall_at_k']:.4f}")
 
-                # Phase 3: Hybrid HNSW (无变化)
+                # Phase 3: Hybrid HNSW
                 if enable_hybrid:
                     try:
                         hybrid_build_start = time.time()
@@ -1203,11 +1214,37 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                                 h_eval = self.evaluate_hybrid_hnsw(hybrid_index, k, n_probe, ground_truths[k])
                                 h_eval['hybrid_build_time'] = hybrid_build_time
                                 phase_records.append({**h_eval, 'k': k})
+                                stats = h_eval.get('hybrid_stats', {})
+                                before_snapshot = {
+                                    'total_assignments': stats.get('total_assignments'),
+                                    'unique_assigned_nodes': stats.get('unique_assigned_nodes'),
+                                    'duplicate_assignments': stats.get('duplicate_assignments'),
+                                    'duplication_rate': stats.get('duplication_rate'),
+                                    'coverage_fraction': stats.get('coverage_fraction'),
+                                    'total_base_nodes': stats.get('total_base_nodes')
+                                }
+                                method_key = f"hybrid_hnsw_k{k}_np{n_probe}"
+                                unified_methods[method_key] = {
+                                    'method': 'hybrid_hnsw',
+                                    'k': k,
+                                    'params': {
+                                        'n_probe': n_probe,
+                                        'parent_level': hybrid_parent_level
+                                    },
+                                    'recall': h_eval['recall_at_k'],
+                                    'timing': {
+                                        'avg_query_time_ms': h_eval['avg_query_time_ms'],
+                                        'std_query_time_ms': h_eval['std_query_time_ms'],
+                                        'build_time_s': hybrid_build_time
+                                    },
+                                    'before_repair': before_snapshot,
+                                    'after_repair': before_snapshot  # Hybrid未做二次repair区分
+                                }
                                 print(f"  [Hybrid HNSW] k={k} n_probe={n_probe} recall={h_eval['recall_at_k']:.4f}")
                     except Exception as he:
                         print(f"  ⚠️ Hybrid HNSW失败: {he}")
 
-                # Phase 4: 单枢纽KMeans-HNSW (使用共享聚类结果)
+                # Phase 4: 单枢纽KMeans-HNSW
                 single_pivot_start = time.time()
                 single_pivot_system = shared_system.create_single_pivot_system()
                 single_pivot_build_time = time.time() - single_pivot_start
@@ -1220,9 +1257,28 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                         sp_eval['phase'] = 'kmeans_hnsw_single_pivot'
                         sp_eval['single_pivot_build_time'] = single_pivot_build_time
                         phase_records.append({**sp_eval, 'k': k})
+                        sstats = sp_eval['system_stats']
+                        method_key = f"kmeans_hnsw_single_k{k}_np{n_probe}"
+                        unified_methods[method_key] = {
+                            'method': 'kmeans_hnsw_single_pivot',
+                            'k': k,
+                            'params': {
+                                'n_probe': n_probe,
+                                'n_clusters': shared_system.params['n_clusters'],
+                                'k_children': shared_system.params['k_children']
+                            },
+                            'recall': sp_eval['recall_at_k'],
+                            'timing': {
+                                'avg_query_time_ms': sp_eval['avg_query_time_ms'],
+                                'std_query_time_ms': sp_eval['std_query_time_ms'],
+                                'build_time_s': single_pivot_build_time
+                            },
+                            'before_repair': sstats.get('before_repair', {}),
+                            'after_repair': sstats.get('after_repair', {})
+                        }
                         print(f"  [单枢纽KMeans HNSW] k={k} n_probe={n_probe} recall={sp_eval['recall_at_k']:.4f}")
 
-                # Phase 5: 多枢纽KMeans-HNSW (使用共享聚类结果)
+                # Phase 5: 多枢纽KMeans-HNSW
                 if multi_pivot_config.get('enabled', False):
                     multi_pivot_start = time.time()
                     multi_pivot_system = shared_system.create_multi_pivot_system(multi_pivot_config)
@@ -1237,6 +1293,26 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                             mp_eval['multi_pivot_build_time'] = multi_pivot_build_time
                             mp_eval['multi_pivot_config'] = multi_pivot_config
                             phase_records.append({**mp_eval, 'k': k})
+                            mstats = mp_eval['system_stats']
+                            method_key = f"kmeans_hnsw_multi_k{k}_np{n_probe}"
+                            unified_methods[method_key] = {
+                                'method': 'kmeans_hnsw_multi_pivot',
+                                'k': k,
+                                'params': {
+                                    'n_probe': n_probe,
+                                    'n_clusters': shared_system.params['n_clusters'],
+                                    'k_children': shared_system.params['k_children'],
+                                    'num_pivots': multi_pivot_config.get('num_pivots')
+                                },
+                                'recall': mp_eval['recall_at_k'],
+                                'timing': {
+                                    'avg_query_time_ms': mp_eval['avg_query_time_ms'],
+                                    'std_query_time_ms': mp_eval['std_query_time_ms'],
+                                    'build_time_s': multi_pivot_build_time
+                                },
+                                'before_repair': mstats.get('before_repair', {}),
+                                'after_repair': mstats.get('after_repair', {})
+                            }
                             print(f"  [多枢纽KMeans HNSW] k={k} n_probe={n_probe} recall={mp_eval['recall_at_k']:.4f}")
 
                 # 计算时间节省
@@ -1246,13 +1322,30 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                 
                 time_savings = f"共享计算节省时间: 原本需要2-3次聚类，现在只需1次"
                 
+                # === 统一 recall_at_k list 聚合 ===
+                # 为每个方法条目添加 recall_at_k 字段以及按 k 聚合的列表
+                group_map: Dict[str, List[Tuple[int, float]]] = {}
+                for mkey, mentry in unified_methods.items():
+                    mentry['recall_at_k'] = mentry['recall']  # 兼容命名
+                    base_key = re.sub(r'_k\d+', '', mkey)
+                    group_map.setdefault(base_key, []).append((mentry['k'], mentry['recall']))
+                for mkey, mentry in unified_methods.items():
+                    base_key = re.sub(r'_k\d+', '', mkey)
+                    k_list = sorted(group_map[base_key], key=lambda x: x[0])
+                    mentry['recall_at_k_list'] = [{'k': kv, 'recall': rv} for kv, rv in k_list]
+
                 combination_results = {
                     'parameters': params,
                     'shared_computation_time': shared_computation_time,
                     'total_build_time': total_build_time,
                     'time_optimization': time_savings,
-                    'phase_evaluations': phase_records,
-                    'multi_pivot_enabled': multi_pivot_config.get('enabled', False)
+                    'phase_evaluations': phase_records,  # 原始保留
+                    'methods_unified': unified_methods,   # 新的统一结构
+                    'multi_pivot_enabled': multi_pivot_config.get('enabled', False),
+                    'adaptive': {
+                        'adaptive_k_children': adaptive_config.get('adaptive_k_children'),
+                        'computed_k_children': adaptive_config.get('computed_k_children', params.get('k_children'))
+                    }
                 }
                 results.append(combination_results)
                 
@@ -1405,6 +1498,8 @@ if __name__ == "__main__":
                         help='子节点搜索的ef参数 (默认: 自动计算)')
     parser.add_argument('--overlap-sample', type=int, default=50,
                         help='重叠统计的采样大小 (默认: 50)')
+    parser.add_argument('--simple-output', action='store_true',
+                        help='输出简洁版JSON (仅 methods_unified)')
     
     args = parser.parse_args()
 
@@ -1499,8 +1594,54 @@ if __name__ == "__main__":
     
     # 保存结果
     if sweep_results:
+        # 相关性分析 (duplication_rate / coverage_fraction vs recall)
+        dup_rates = []
+        dup_recalls = []
+        cover_rates = []
+        cover_recalls = []
+        for combo in sweep_results:
+            for m in combo['methods_unified'].values():
+                after_stats = m.get('after_repair') or {}
+                dr = after_stats.get('duplication_rate')
+                cf = after_stats.get('coverage_fraction')
+                recall_val = m.get('recall')
+                if dr is not None and recall_val is not None:
+                    dup_rates.append(dr)
+                    dup_recalls.append(recall_val)
+                if cf is not None and recall_val is not None:
+                    cover_rates.append(cf)
+                    cover_recalls.append(recall_val)
+        def _pearson(xs, ys):
+            if len(xs) < 2:
+                return None
+            try:
+                return float(np.corrcoef(xs, ys)[0,1])
+            except Exception:
+                return None
+        correlation_analysis = {
+            'duplication_vs_recall_pearson': _pearson(dup_rates, dup_recalls),
+            'coverage_vs_recall_pearson': _pearson(cover_rates, cover_recalls),
+            'samples_duplication': len(dup_rates),
+            'samples_coverage': len(cover_rates),
+            'note': 'Simple Pearson correlation using after_repair stats across all method variants.'
+        }
+
+        # 简洁输出处理
+        if args.simple_output:
+            trimmed_sweep = []
+            for combo in sweep_results:
+                trimmed_sweep.append({
+                    'parameters': combo['parameters'],
+                    'methods_unified': combo['methods_unified'],
+                    'adaptive': combo['adaptive'],
+                    'multi_pivot_enabled': combo['multi_pivot_enabled']
+                })
+            sweep_payload = trimmed_sweep
+        else:
+            sweep_payload = sweep_results
+
         results = {
-            'sweep_results': sweep_results,
+            'sweep_results': sweep_payload,
             'optimization_info': {
                 'method': 'shared_computation_optimization',
                 'description': '通过共享K-Means聚类计算减少重复构建时间',
@@ -1513,13 +1654,15 @@ if __name__ == "__main__":
             },
             'multi_pivot_config': multi_pivot_config,
             'adaptive_config': adaptive_config,
+            'correlation_analysis': correlation_analysis,
             'evaluation_info': {
                 'dataset_size': len(base_vectors),
                 'query_size': len(query_vectors),
                 'dimension': base_vectors.shape[1],
                 'multi_pivot_enabled': args.enable_multi_pivot,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-            }
+            },
+            'output_mode': 'simple' if args.simple_output else 'full'
         }
         save_results(results, 'optimized_multi_pivot_results.json')
         
