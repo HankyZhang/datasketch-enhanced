@@ -537,6 +537,10 @@ class OptimizedMultiPivotSystem:
         child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
         overquery_k = int(k_children * self.pivot_overquery_factor)
 
+        need_counts = (self.adaptive_config.get('diversify_max_assignments') is not None) or \
+                      (self.adaptive_config.get('repair_min_assignments') is not None)
+        assignment_counts: Dict[Hashable, int] = {} if need_counts else None
+
         self.parent_child_map: Dict[Hashable, List[Hashable]] = {}
 
         for cluster_idx, centroid_id in enumerate(self.centroid_ids):
@@ -549,7 +553,18 @@ class OptimizedMultiPivotSystem:
                         all_candidates.add(node_id)
 
                 children = self._select_best_children_from_candidates(list(all_candidates), pivots, k_children)
+
+                # Apply diversification if enabled
+                if self.adaptive_config.get('diversify_max_assignments') is not None:
+                    children = self._apply_diversify_filter(children, assignment_counts,
+                                                          self.adaptive_config['diversify_max_assignments'])
+
                 self.parent_child_map[centroid_id] = children
+
+                # Update assignment counts
+                if need_counts:
+                    for child_id in children:
+                        assignment_counts[child_id] = assignment_counts.get(child_id, 0) + 1
 
                 for child_id in children:
                     if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
@@ -559,14 +574,20 @@ class OptimizedMultiPivotSystem:
                 print(f"        ⚠️ 质心 {centroid_id} 的多枢纽子节点查找失败: {e}")
                 self.parent_child_map[centroid_id] = []
 
+        pre_stats = self._compute_detailed_node_stats()
+        if self.adaptive_config.get('repair_min_assignments') is not None:
+            self._repair_child_assignments(assignment_counts)
+            post_stats = self._compute_detailed_node_stats()
+        else:
+            post_stats = pre_stats
+
         total_children = sum(len(children) for children in self.parent_child_map.values())
         avg_children = total_children / max(1, len(self.parent_child_map))
         print(f"      ✅ 多枢纽映射完成: {total_children} 个子节点, 平均 {avg_children:.1f} 个/质心")
-        snapshot = self._compute_detailed_node_stats()
-        self.pre_repair_stats = snapshot
-        self.post_repair_stats = snapshot
-        self.stats['before_repair'] = snapshot
-        self.stats['after_repair'] = snapshot
+        self.pre_repair_stats = pre_stats
+        self.post_repair_stats = post_stats
+        self.stats['before_repair'] = pre_stats
+        self.stats['after_repair'] = post_stats
     
     def _select_pivots_for_centroid(self, cluster_idx: int, overquery_k: int, child_search_ef: int) -> List[np.ndarray]:
         """为质心选择多个枢纽点"""
@@ -767,6 +788,82 @@ class OptimizedMultiPivotSystem:
         sorted_indices = np.argsort(distances)[:k]
         return [(valid_ids[i], distances[i]) for i in sorted_indices]
     
+    def _apply_diversify_filter(
+        self, 
+        children: List[Hashable], 
+        assignment_counts: Dict[Hashable, int], 
+        max_assignments: int
+    ) -> List[Hashable]:
+        """Apply diversify filter to limit child assignments."""
+        filtered_children = []
+        for child_id in children:
+            current_count = assignment_counts.get(child_id, 0)
+            if current_count < max_assignments:
+                filtered_children.append(child_id)
+        return filtered_children
+    
+    def _repair_child_assignments(self, assignment_counts: Dict[Hashable, int]):
+        """Repair phase: ensure every child has minimum assignments."""
+        min_assignments = self.adaptive_config.get('repair_min_assignments')
+        if not min_assignments:
+            return
+            
+        print(f"        🔧 Multi-Pivot Repair phase: ensuring minimum {min_assignments} assignments...")
+        
+        # Find under-assigned children
+        all_base_nodes = set(self.base_index.keys())
+        assigned_nodes = set(assignment_counts.keys())
+        unassigned_nodes = all_base_nodes - assigned_nodes
+        
+        under_assigned = {
+            node_id for node_id, count in assignment_counts.items()
+            if count < min_assignments
+        }
+        under_assigned.update(unassigned_nodes)
+        
+        print(f"        Found {len(under_assigned)} under-assigned nodes "
+              f"({len(unassigned_nodes)} completely unassigned)")
+        
+        # For each under-assigned node, find closest centroids and assign
+        for node_id in under_assigned:
+            try:
+                # Get the node's vector
+                if node_id in self.shared_system.node_id_to_idx:
+                    idx = self.shared_system.node_id_to_idx[node_id]
+                    node_vector = self.shared_system.dataset_vectors[idx]
+                else:
+                    continue  # Skip if we can't get the vector
+                
+                # Find distance to all centroids
+                distances = []
+                for i, centroid_vector in enumerate(self.centroids):
+                    dist = np.linalg.norm(node_vector - centroid_vector)
+                    distances.append((dist, self.centroid_ids[i]))
+                
+                # Sort by distance and assign to closest centroids
+                distances.sort()
+                current_assignments = assignment_counts.get(node_id, 0)
+                needed_assignments = max(0, min_assignments - current_assignments)
+                
+                for _, centroid_id in distances[:needed_assignments]:
+                    if node_id not in self.parent_child_map[centroid_id]:
+                        self.parent_child_map[centroid_id].append(node_id)
+                        assignment_counts[node_id] = assignment_counts.get(node_id, 0) + 1
+                        
+                        # Ensure vector is available
+                        if node_id not in self.child_vectors:
+                            self.child_vectors[node_id] = node_vector
+                            
+            except Exception as e:
+                print(f"        ⚠️ Failed to repair node {node_id}: {e}")
+                continue
+        
+        # Report coverage after repair
+        final_assigned = set(assignment_counts.keys())
+        coverage = len(final_assigned) / len(all_base_nodes) if all_base_nodes else 0.0
+        print(f"        Multi-Pivot repair completed. Final coverage: {coverage:.3f} "
+              f"({len(final_assigned)}/{len(all_base_nodes)} nodes)")
+
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         stats = self.stats.copy()
