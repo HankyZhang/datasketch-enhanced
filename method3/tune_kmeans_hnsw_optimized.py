@@ -412,7 +412,40 @@ class OptimizedSinglePivotSystem:
         if self.search_times:
             stats['avg_search_time_ms'] = float(np.mean(self.search_times))
             stats['std_search_time_ms'] = float(np.std(self.search_times))
+        
+        # 添加详细的节点统计信息
+        node_stats = self._compute_detailed_node_stats()
+        stats.update(node_stats)
         return stats
+    
+    def _compute_detailed_node_stats(self) -> Dict[str, Any]:
+        """计算详细的节点分配统计"""
+        # 统计总分配数和去重节点数
+        all_assigned_nodes = set()
+        total_assignments = 0
+        duplicate_assignments = 0
+        
+        for centroid_id, children in self.parent_child_map.items():
+            for child_id in children:
+                total_assignments += 1
+                if child_id in all_assigned_nodes:
+                    duplicate_assignments += 1
+                else:
+                    all_assigned_nodes.add(child_id)
+        
+        unique_nodes = len(all_assigned_nodes)
+        total_base_nodes = len(self.base_index)
+        coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
+        duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
+        
+        return {
+            'total_assignments': total_assignments,
+            'unique_assigned_nodes': unique_nodes,
+            'duplicate_assignments': duplicate_assignments,
+            'duplication_rate': duplication_rate,
+            'coverage_fraction': coverage_fraction,
+            'total_base_nodes': total_base_nodes
+        }
 
 
 class OptimizedMultiPivotSystem:
@@ -717,7 +750,40 @@ class OptimizedMultiPivotSystem:
         if self.search_times:
             stats['avg_search_time_ms'] = float(np.mean(self.search_times))
             stats['std_search_time_ms'] = float(np.std(self.search_times))
+        
+        # 添加详细的节点统计信息
+        node_stats = self._compute_detailed_node_stats()
+        stats.update(node_stats)
         return stats
+    
+    def _compute_detailed_node_stats(self) -> Dict[str, Any]:
+        """计算详细的节点分配统计"""
+        # 统计总分配数和去重节点数
+        all_assigned_nodes = set()
+        total_assignments = 0
+        duplicate_assignments = 0
+        
+        for centroid_id, children in self.parent_child_map.items():
+            for child_id in children:
+                total_assignments += 1
+                if child_id in all_assigned_nodes:
+                    duplicate_assignments += 1
+                else:
+                    all_assigned_nodes.add(child_id)
+        
+        unique_nodes = len(all_assigned_nodes)
+        total_base_nodes = len(self.base_index)
+        coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
+        duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
+        
+        return {
+            'total_assignments': total_assignments,
+            'unique_assigned_nodes': unique_nodes,
+            'duplicate_assignments': duplicate_assignments,
+            'duplication_rate': duplication_rate,
+            'coverage_fraction': coverage_fraction,
+            'total_base_nodes': total_base_nodes
+        }
 
 
 class OptimizedKMeansHNSWMultiPivotEvaluator:
@@ -885,8 +951,68 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
         """评估Hybrid HNSW性能"""
         result = self.evaluate_recall_generic(hybrid_index, k, n_probe, ground_truth, "Hybrid HNSW")
         result['phase'] = 'hybrid_hnsw_level'
-        result['hybrid_stats'] = hybrid_index.get_stats()
+        hybrid_stats = hybrid_index.get_stats()
+        
+        # 添加节点统计信息
+        node_stats = self._compute_hybrid_node_stats(hybrid_index)
+        hybrid_stats.update(node_stats)
+        
+        result['hybrid_stats'] = hybrid_stats
         return result
+    
+    def _compute_hybrid_node_stats(self, hybrid_index) -> Dict[str, Any]:
+        """计算 HybridHNSW 的节点统计"""
+        try:
+            # 获取父子映射
+            parent_child_map = getattr(hybrid_index, 'parent_child_map', {})
+            base_index = getattr(hybrid_index, 'base_index', None)
+            
+            if not parent_child_map or not base_index:
+                return {
+                    'total_assignments': 0,
+                    'unique_assigned_nodes': 0,
+                    'duplicate_assignments': 0,
+                    'duplication_rate': 0.0,
+                    'coverage_fraction': 0.0,
+                    'total_base_nodes': 0
+                }
+            
+            # 统计总分配数和去重节点数
+            all_assigned_nodes = set()
+            total_assignments = 0
+            duplicate_assignments = 0
+            
+            for parent_id, children in parent_child_map.items():
+                for child_id in children:
+                    total_assignments += 1
+                    if child_id in all_assigned_nodes:
+                        duplicate_assignments += 1
+                    else:
+                        all_assigned_nodes.add(child_id)
+            
+            unique_nodes = len(all_assigned_nodes)
+            total_base_nodes = len(base_index)
+            coverage_fraction = unique_nodes / total_base_nodes if total_base_nodes > 0 else 0.0
+            duplication_rate = duplicate_assignments / total_assignments if total_assignments > 0 else 0.0
+            
+            return {
+                'total_assignments': total_assignments,
+                'unique_assigned_nodes': unique_nodes,
+                'duplicate_assignments': duplicate_assignments,
+                'duplication_rate': duplication_rate,
+                'coverage_fraction': coverage_fraction,
+                'total_base_nodes': total_base_nodes
+            }
+        except Exception as e:
+            print(f"Warning: Could not compute hybrid node stats: {e}")
+            return {
+                'total_assignments': 0,
+                'unique_assigned_nodes': 0,
+                'duplicate_assignments': 0,
+                'duplication_rate': 0.0,
+                'coverage_fraction': 0.0,
+                'total_base_nodes': 0
+            }
 
     def _evaluate_pure_kmeans_from_shared(
         self, 
@@ -1132,6 +1258,10 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                 
                 best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
                 print(f"  ✅ 组合完成，最佳召回率: {best_recall:.4f}")
+                
+                # 输出详细的节点统计对比
+                self._print_detailed_node_statistics(phase_records)
+                
                 print(f"  ⏱️  {time_savings}")
                 
             except Exception as e:
@@ -1142,6 +1272,71 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
         print(f"    Multi-Pivot启用: {multi_pivot_config.get('enabled', False)}")
         print("🚀 关键优化效果: 避免了重复的K-Means聚类计算")
         return results
+    
+    def _print_detailed_node_statistics(self, phase_records: List[Dict[str, Any]]):
+        """输出详细的节点统计对比表"""
+        print("\n📊 详细节点统计对比:")
+        print("=" * 80)
+        
+        # 表头
+        header = f"{'方法':<20} {'节点总数':<10} {'去重节点':<10} {'重复数':<8} {'重复率':<8} {'覆盖率':<8} {'召回率':<8}"
+        print(header)
+        print("-" * 80)
+        
+        # 收集各方法的统计数据
+        methods_stats = {}
+        
+        for record in phase_records:
+            phase = record.get('phase', 'unknown')
+            recall = record.get('recall_at_k', 0.0)
+            
+            # 从system_stats或hybrid_stats中获取节点统计
+            if phase == 'hybrid_hnsw_level':
+                stats = record.get('hybrid_stats', {})
+                method_name = "HybridHNSW"
+            elif phase == 'kmeans_hnsw_single_pivot':
+                stats = record.get('system_stats', {})
+                method_name = "KMeansHNSW单枢纽"
+            elif phase == 'kmeans_hnsw_multi_pivot':
+                stats = record.get('system_stats', {})
+                method_name = "KMeansHNSW多枢纽"
+            else:
+                continue
+            
+            if method_name not in methods_stats:
+                methods_stats[method_name] = {
+                    'total_assignments': stats.get('total_assignments', 0),
+                    'unique_assigned_nodes': stats.get('unique_assigned_nodes', 0),
+                    'duplicate_assignments': stats.get('duplicate_assignments', 0),
+                    'duplication_rate': stats.get('duplication_rate', 0.0),
+                    'coverage_fraction': stats.get('coverage_fraction', 0.0),
+                    'best_recall': recall
+                }
+            else:
+                # 保留最佳召回率
+                if recall > methods_stats[method_name]['best_recall']:
+                    methods_stats[method_name]['best_recall'] = recall
+        
+        # 输出统计表
+        for method_name, stats in methods_stats.items():
+            total_assign = stats['total_assignments']
+            unique_nodes = stats['unique_assigned_nodes']
+            duplicates = stats['duplicate_assignments']
+            dup_rate = stats['duplication_rate']
+            coverage = stats['coverage_fraction']
+            recall = stats['best_recall']
+            
+            row = f"{method_name:<20} {total_assign:<10} {unique_nodes:<10} {duplicates:<8} {dup_rate:<8.3f} {coverage:<8.3f} {recall:<8.3f}"
+            print(row)
+        
+        print("=" * 80)
+        print("说明:")
+        print("- 节点总数: 所有质心分配的子节点总数 (包含重复)")
+        print("- 去重节点: 去除重复后的唯一子节点数")
+        print("- 重复数: 被多次分配的节点数量")
+        print("- 重复率: 重复分配比例 (重复数/总数)")
+        print("- 覆盖率: 被分配节点占基础索引的比例")
+        print("- 召回率: 该配置下的最佳召回率\n")
 
 
 def save_results(results: Dict[str, Any], filename: str):
