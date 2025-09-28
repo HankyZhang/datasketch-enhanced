@@ -75,6 +75,7 @@ def compute_assignment_stats(parent_child_map: Dict[Hashable, List[Hashable]], b
 
 
 
+
 class SharedKMeansHNSWSystem:
     """共享HNSW索引和K-Means聚类计算的系统"""
     
@@ -157,23 +158,9 @@ class SharedKMeansHNSWSystem:
         self.centroids = self.kmeans_model.cluster_centers_
         self.n_clusters = actual_clusters
 
-        # 自适应k_children逻辑集中在共享层
-        if self.adaptive_config.get('adaptive_k_children'):
-            avg_cluster_size = len(self.node_vectors) / max(1, actual_clusters)
-            scale = self.adaptive_config.get('k_children_scale', 1.5)
-            k_min = self.adaptive_config.get('k_children_min', 50)
-            k_max = self.adaptive_config.get('k_children_max')
-            adaptive_k = int(avg_cluster_size * scale)
-            if adaptive_k < k_min:
-                adaptive_k = k_min
-            if k_max is not None and adaptive_k > k_max:
-                adaptive_k = k_max
-            original_k = self.params.get('k_children')
-            self.params['k_children'] = adaptive_k
-            print(f"      🔧 自适应k_children: 原始={original_k} -> 计算={adaptive_k} (平均聚类大小={avg_cluster_size:.1f})")
-            # 记录在adaptive_config中以便下游引用
-            self.adaptive_config['computed_k_children'] = adaptive_k
-        
+        # 自适应k_children逻辑已移除
+        # (Previously adjusted k_children based on avg cluster size)
+
         # Add: store avg cluster size for downstream adaptive ef logic
         self.avg_cluster_size = len(self.node_vectors) / max(1, actual_clusters)
         
@@ -1563,7 +1550,7 @@ class OptimizedKMeansHNSWMultiPivotEvaluator:
                     'methods_unified': unified_methods,   # 新的统一结构
                     'multi_pivot_enabled': multi_pivot_config.get('enabled', False),
                     'adaptive': {
-                        'adaptive_k_children': adaptive_config.get('adaptive_k_children'),
+                        'adaptive_k_children': False,
                         'computed_k_children': adaptive_config.get('computed_k_children', params.get('k_children'))
                     }
                 }
@@ -1695,16 +1682,6 @@ if __name__ == "__main__":
                         choices=['line_perp_third', 'max_min_distance'],
                         help='枢纽选择策略')
     
-    # 自适应优化选项
-    parser.add_argument('--adaptive-k-children', action='store_true',
-                        help='启用基于平均聚类大小的自适应k_children')
-    parser.add_argument('--k-children-scale', type=float, default=1.5,
-                        help='自适应k_children的缩放因子 (默认: 1.5)')
-    parser.add_argument('--k-children-min', type=int, default=50,
-                        help='自适应时的最小k_children (默认: 50)')
-    parser.add_argument('--k-children-max', type=int, default=None,
-                        help='自适应时的最大k_children (可选)')
-    
     # 多样化优化选项
     parser.add_argument('--diversify-max-assignments', type=int, default=None,
                         help='每个子节点的最大分配数，启用多样化 (可选)')
@@ -1730,8 +1707,6 @@ if __name__ == "__main__":
     
     # 显示启用的优化选项
     optimizations = []
-    if args.adaptive_k_children:
-        optimizations.append(f"自适应k_children (scale={args.k_children_scale})")
     if args.diversify_max_assignments:
         optimizations.append(f"多样化限制 (max={args.diversify_max_assignments})")
     if args.repair_min_assignments:
@@ -1772,8 +1747,8 @@ if __name__ == "__main__":
 
     param_grid = {
         'n_clusters': cluster_options,
-        'k_children': [100],
-        'child_search_ef': [args.child_search_ef] if args.child_search_ef else [200]
+        'k_children': [1000],
+        
     }
     
     evaluation_params = {
@@ -1784,10 +1759,7 @@ if __name__ == "__main__":
     }
     
     adaptive_config = {
-        'adaptive_k_children': args.adaptive_k_children,
-        'k_children_scale': args.k_children_scale,
-        'k_children_min': args.k_children_min,
-        'k_children_max': args.k_children_max,
+        # 移除 adaptive_k_children 相关参数
         'diversify_max_assignments': args.diversify_max_assignments,
         'repair_min_assignments': args.repair_min_assignments,
         'overlap_sample': args.overlap_sample
