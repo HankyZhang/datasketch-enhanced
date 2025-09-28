@@ -623,6 +623,14 @@ class OptimizedMultiPivotSystem:
 
         for cluster_idx, centroid_id in enumerate(self.centroid_ids):
             try:
+                # FIX: define overquery_k before usage (previously NameError)
+                if 'overquery_k' not in locals():
+                    # derive overquery_k per centroid based on k_children and pivot_overquery_factor
+                    from math import ceil
+                    base_k = k_children
+                    factor = self.pivot_overquery_factor if hasattr(self, 'pivot_overquery_factor') else 1.2
+                    # ensure at least k_children, allow small expansion, cap at 4*k_children
+                    overquery_k = max(base_k, min(4 * base_k, int(ceil(base_k * factor))))
                 pivots = self._select_pivots_for_centroid(cluster_idx, overquery_k, child_search_ef)
                 all_candidates: set = set()
                 for pivot_vector in pivots:
