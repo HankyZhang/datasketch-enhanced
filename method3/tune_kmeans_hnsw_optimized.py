@@ -174,6 +174,9 @@ class SharedKMeansHNSWSystem:
             # 记录在adaptive_config中以便下游引用
             self.adaptive_config['computed_k_children'] = adaptive_k
         
+        # Add: store avg cluster size for downstream adaptive ef logic
+        self.avg_cluster_size = len(self.node_vectors) / max(1, actual_clusters)
+        
     def _build_shared_lookup_structures(self):
         """构建共享的查找结构"""
         # 聚类ID分配
@@ -254,6 +257,10 @@ class OptimizedSinglePivotSystem:
         self.n_clusters = shared_system.n_clusters
         # 不再创建node_vectors副本，直接使用shared_system的引用
         self.node_ids = shared_system.node_ids
+        
+        # 质心包含控制（与原始版本保持一致，默认不包含）
+        self.include_centroids_in_results = adaptive_config.get('include_centroids_in_results', False)
+        
         # 统计信息需在构建前先占位，构建完成再补充
         self.stats = {
             'method': 'single_pivot_optimized',
@@ -277,7 +284,12 @@ class OptimizedSinglePivotSystem:
         print("      📍 构建单枢纽父子节点映射...")
 
         k_children = self.shared_system.params['k_children']
-        child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
+        # NEW: adaptive default child_search_ef if not provided or too small
+        raw_child_search_ef = self.shared_system.params.get('child_search_ef')
+        if raw_child_search_ef is None or raw_child_search_ef < k_children:
+            # heuristic: max(k_children*1.5, k_children+50) but cap at 2*k_children
+            self.shared_system.params['child_search_ef'] = max(int(k_children * 1.5), k_children + 50)
+        child_search_ef = self.shared_system.params['child_search_ef']
 
         need_counts = (self.adaptive_config.get('diversify_max_assignments') is not None) or \
                       (self.adaptive_config.get('repair_min_assignments') is not None)
@@ -297,14 +309,44 @@ class OptimizedSinglePivotSystem:
 
                 self.parent_child_map[centroid_id] = children
 
+                # NEW: after building each centroid children list, ensure we reach k_children (fallback linear scan among cluster if possible)
+                # modify inside the loop by appending missing
+                # (We inject a small helper local function)
+                def _ensure_min_children(children_list: List[Hashable]):
+                    if len(children_list) >= k_children:
+                        return children_list
+                    # fallback: expand by querying again with higher ef if possible
+                    try:
+                        need = k_children - len(children_list)
+                        ef_boost = min(child_search_ef * 2, k_children * 4)
+                        more_results = self.base_index.query(centroid_vector, k=k_children, ef=ef_boost)
+                        extra_ids = [nid for nid, _ in more_results if nid not in children_list]
+                        for nid in extra_ids:
+                            children_list.append(nid)
+                            if len(children_list) >= k_children:
+                                break
+                    except Exception:
+                        pass
+                    return children_list
+                # integrate after hnsw_results retrieval
+                self.parent_child_map[centroid_id] = _ensure_min_children(self.parent_child_map[centroid_id])
+
                 if need_counts:
                     for child_id in children:
                         assignment_counts[child_id] = assignment_counts.get(child_id, 0) + 1
 
                 for child_id in children:
-                    if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
-                        idx = self.shared_system.node_id_to_idx[child_id]
-                        self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
+                    if child_id not in self.child_vectors:
+                        # 优先使用预构建的映射，如果不存在则直接从base_index获取
+                        if child_id in self.shared_system.node_id_to_idx:
+                            idx = self.shared_system.node_id_to_idx[child_id]
+                            self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
+                        else:
+                            # 回退到直接从HNSW索引获取，确保不遗漏任何有效子节点
+                            try:
+                                self.child_vectors[child_id] = self.base_index[child_id]
+                            except KeyError:
+                                print(f"        ⚠️ 警告: 子节点 {child_id} 无法获取向量，跳过")
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的子节点查找失败: {e}")
                 self.parent_child_map[centroid_id] = []
@@ -356,6 +398,32 @@ class OptimizedSinglePivotSystem:
             children = self.parent_child_map.get(centroid_id, [])
             candidate_children.update(children)
         
+        # 条件性包含质心在结果中（与原始版本保持一致）
+        if self.include_centroids_in_results:
+            for centroid_id, _ in closest_centroids:
+                # 将质心作为候选节点（使用质心向量）
+                centroid_idx = self.centroid_ids.index(centroid_id)
+                centroid_vector = self.centroids[centroid_idx]
+                # 临时存储质心向量
+                self.child_vectors[centroid_id] = centroid_vector
+                candidate_children.add(centroid_id)
+        
+        # NEW: early expansion if candidate pool < k -> expand by querying base index directly as safety net
+        if len(candidate_children) < k:
+            try:
+                # approximate: union of top centroid child sets might be too small; pull extra from base HNSW
+                base_extra = self.base_index.query(query_vector, k=max(k*2, 50), ef=max(100, k*4))
+                for nid, _ in base_extra:
+                    candidate_children.add(nid)
+                    if nid not in self.child_vectors:
+                        # store vector for distance calc
+                        try:
+                            self.child_vectors[nid] = self.base_index[nid]
+                        except KeyError:
+                            pass
+            except Exception:
+                pass
+        
         if not candidate_children:
             return []
         
@@ -378,6 +446,11 @@ class OptimizedSinglePivotSystem:
         
         # 排序并返回top-k
         sorted_indices = np.argsort(distances)[:k]
+        # After computing distances add diagnostic statistic
+        # append candidate size for later analysis
+        if not hasattr(self, '_candidate_sizes'):
+            self._candidate_sizes = []
+        self._candidate_sizes.append(len(valid_ids))
         return [(valid_ids[i], distances[i]) for i in sorted_indices]
     
     def _apply_diversify_filter(
@@ -509,6 +582,9 @@ class OptimizedMultiPivotSystem:
         self.pivot_selection_strategy = multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third')
         self.pivot_overquery_factor = multi_pivot_config.get('pivot_overquery_factor', 1.2)
         
+        # 质心包含控制（与原始版本保持一致，默认不包含）
+        self.include_centroids_in_results = adaptive_config.get('include_centroids_in_results', False)
+        
         # 统计信息占位，映射构建后补充 num_children
         self.stats = {
             'method': 'multi_pivot_optimized',
@@ -534,8 +610,10 @@ class OptimizedMultiPivotSystem:
         print(f"      🎯 构建多枢纽父子节点映射 (pivots={self.num_pivots})...")
 
         k_children = self.shared_system.params['k_children']
-        child_search_ef = self.shared_system.params.get('child_search_ef', k_children * 2)
-        overquery_k = int(k_children * self.pivot_overquery_factor)
+        raw_child_search_ef = self.shared_system.params.get('child_search_ef')
+        if raw_child_search_ef is None or raw_child_search_ef < k_children:
+            self.shared_system.params['child_search_ef'] = max(int(k_children * 1.5), k_children + 50)
+        child_search_ef = self.shared_system.params['child_search_ef']
 
         need_counts = (self.adaptive_config.get('diversify_max_assignments') is not None) or \
                       (self.adaptive_config.get('repair_min_assignments') is not None)
@@ -567,9 +645,17 @@ class OptimizedMultiPivotSystem:
                         assignment_counts[child_id] = assignment_counts.get(child_id, 0) + 1
 
                 for child_id in children:
-                    if child_id not in self.child_vectors and child_id in self.shared_system.node_id_to_idx:
-                        idx = self.shared_system.node_id_to_idx[child_id]
-                        self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
+                    if child_id not in self.child_vectors:
+                        # 优先使用预构建的映射，如果不存在则直接从base_index获取
+                        if child_id in self.shared_system.node_id_to_idx:
+                            idx = self.shared_system.node_id_to_idx[child_id]
+                            self.child_vectors[child_id] = self.shared_system.dataset_vectors[idx]
+                        else:
+                            # 回退到直接从HNSW索引获取，确保不遗漏任何有效子节点
+                            try:
+                                self.child_vectors[child_id] = self.base_index[child_id]
+                            except KeyError:
+                                print(f"        ⚠️ 警告: 子节点 {child_id} 无法获取向量，跳过")
             except Exception as e:
                 print(f"        ⚠️ 质心 {centroid_id} 的多枢纽子节点查找失败: {e}")
                 self.parent_child_map[centroid_id] = []
@@ -764,6 +850,30 @@ class OptimizedMultiPivotSystem:
             children = self.parent_child_map.get(centroid_id, [])
             candidate_children.update(children)
         
+        # 条件性包含质心在结果中（与原始版本保持一致）
+        if self.include_centroids_in_results:
+            for centroid_id, _ in closest_centroids:
+                # 将质心作为候选节点（使用质心向量）
+                centroid_idx = self.centroid_ids.index(centroid_id)
+                centroid_vector = self.centroids[centroid_idx]
+                # 临时存储质心向量
+                self.child_vectors[centroid_id] = centroid_vector
+                candidate_children.add(centroid_id)
+        
+        # NEW: early expansion if candidate pool < k -> expand by querying base index directly as safety net
+        if len(candidate_children) < k:
+            try:
+                base_extra = self.base_index.query(query_vector, k=max(k*2, 50), ef=max(100, k*4))
+                for nid, _ in base_extra:
+                    candidate_children.add(nid)
+                    if nid not in self.child_vectors:
+                        try:
+                            self.child_vectors[nid] = self.base_index[nid]
+                        except KeyError:
+                            pass
+            except Exception:
+                pass
+        
         if not candidate_children:
             return []
         
@@ -786,6 +896,11 @@ class OptimizedMultiPivotSystem:
         
         # 排序并返回top-k
         sorted_indices = np.argsort(distances)[:k]
+        # After computing distances add diagnostic statistic
+        # append candidate size for later analysis
+        if not hasattr(self, '_candidate_sizes'):
+            self._candidate_sizes = []
+        self._candidate_sizes.append(len(valid_ids))
         return [(valid_ids[i], distances[i]) for i in sorted_indices]
     
     def _apply_diversify_filter(
