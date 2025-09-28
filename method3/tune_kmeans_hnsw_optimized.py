@@ -1697,6 +1697,8 @@ if __name__ == "__main__":
                         help='重叠统计的采样大小 (默认: 50)')
     parser.add_argument('--simple-output', action='store_true',
                         help='输出简洁版JSON (仅 methods_unified)')
+    parser.add_argument('--use-unified-core', action='store_true',
+                        help='使用简化统一TwoStageRetriever核心替代旧的多实现')
     
     args = parser.parse_args()
 
