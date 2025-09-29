@@ -134,113 +134,95 @@ class BaseAssignmentStrategy:
     ) -> List[int]:
         raise NotImplementedError
 
-    def metadata(self) -> Dict[str, Any]:
+    def metadata(self) -> Dict[str, Any]:  # basic metadata
         return {"strategy": self.name}
 
 
 class SinglePivotStrategy(BaseAssignmentStrategy):
-    """每个质心只用自身作为父节点，孩子=聚类成员或通过 HNSW 近邻截断。"""
+    """Single pivot strategy: cluster centroid is the pivot; assign k_children via HNSW global search.
+    
+    This implementation uses HNSW dynamic querying across the full index (like v1.py),
+    rather than limiting to pre-assigned cluster members.
+    """
+    name = "single"
 
-    name = "single_pivot"
-
-    def assign_children(self, cluster_id, centroid_vec, shared, k_children, child_search_ef):
-        members = shared.cluster_members[cluster_id]
-        if len(members) <= k_children:
-            return members
-        # 如果超出，按与质心距离排序截断
-        # 构造成员向量索引映射
-        nid_to_vec_idx = {nid: i for i, nid in enumerate(shared.node_ids)}
-        centroid = centroid_vec
-        scored = []
-        for nid in members:
-            vec = shared.node_vectors[nid_to_vec_idx[nid]]
-            scored.append((l2(vec, centroid), nid))
-        scored.sort(key=lambda x: x[0])
-        return [nid for _, nid in scored[:k_children]]
+    def assign_children(self, cluster_id, centroid_vec, shared, k_children, child_search_ef):  # type: ignore[override]
+        # Use HNSW to dynamically query the full index with the centroid
+        # This matches the behavior in v1.py OptimizedSinglePivotSystem
+        try:
+            neighbors = shared.base_index.query(
+                centroid_vec,
+                k=k_children,
+                ef=child_search_ef
+            )
+            # Extract node IDs from HNSW query results
+            return [node_id for node_id, _ in neighbors]
+        except Exception as e:
+            # Fallback to cluster-member-only approach if HNSW query fails
+            print(f"Warning: HNSW query failed for cluster {cluster_id}, falling back to cluster members: {e}")
+            members = shared.cluster_members[cluster_id]
+            if len(members) <= k_children:
+                return members
+            nid_to_vec_idx = {nid: i for i, nid in enumerate(shared.node_ids)}
+            scored: List[Tuple[float, int]] = []
+            for nid in members:
+                vec = shared.node_vectors[nid_to_vec_idx[nid]]
+                scored.append((l2(vec, centroid_vec), nid))
+            scored.sort(key=lambda x: x[0])
+            return [nid for _, nid in scored[:k_children]]
 
 
 class MultiPivotStrategy(BaseAssignmentStrategy):
-    """基于多个 pivot（质心 + 远点 + 垂直点 + max-min）筛选。"""
+    """Multi-pivot diversification inside each cluster.
 
-    name = "multi_pivot"
+    Picks several pivots (either random or farthest-point selection) then scores
+    each member by min distance to any pivot; take top k_children (closest to some pivot).
+    (Simplified vs earlier complex logic.)
+    """
 
-    def __init__(self, num_pivots: int = 3, overquery_factor: float = 1.2, pivot_strategy: str = "line_perp_third"):
+    name = "multi"
+
+    def __init__(self, num_pivots: int = 3, pivot_strategy: str = "line_perp_third"):
         self.num_pivots = max(1, num_pivots)
-        self.overquery_factor = overquery_factor
         self.pivot_strategy = pivot_strategy
 
-    def metadata(self):
-        return {
-            "strategy": self.name,
-            "num_pivots": self.num_pivots,
-            "pivot_strategy": self.pivot_strategy,
-            "overquery_factor": self.overquery_factor,
-        }
+    def metadata(self) -> Dict[str, Any]:  # type: ignore[override]
+        return {"strategy": self.name, "num_pivots": self.num_pivots, "pivot_strategy": self.pivot_strategy}
 
-    def assign_children(self, cluster_id, centroid_vec, shared, k_children, child_search_ef):
-        if self.num_pivots == 1:
-            return SinglePivotStrategy().assign_children(cluster_id, centroid_vec, shared, k_children, child_search_ef)
-
-        base = shared.base_index
-        over_k = int(k_children * self.overquery_factor) + 5
-        over_k = max(over_k, k_children)
-        try:
-            results = base.query(centroid_vec, k=over_k, ef=child_search_ef)
-            candidate_ids = [nid for nid, _ in results]
-        except Exception:
-            # fallback to cluster members
-            candidate_ids = list(shared.cluster_members[cluster_id])
-
-        # 构造向量缓存
+    def assign_children(self, cluster_id, centroid_vec, shared, k_children, child_search_ef):  # type: ignore[override]
+        members = shared.cluster_members[cluster_id]
+        if len(members) <= k_children:
+            return members
         nid_to_vec_idx = {nid: i for i, nid in enumerate(shared.node_ids)}
-        def vec_of(nid: int) -> np.ndarray:
-            return shared.node_vectors[nid_to_vec_idx[nid]]
+        # Build vectors list for members
+        member_vecs = {nid: shared.node_vectors[nid_to_vec_idx[nid]] for nid in members}
 
-        pivots: List[np.ndarray] = [centroid_vec]
-        # 选第二个：距离质心最远
-        if len(candidate_ids) >= 2 and self.num_pivots >= 2:
-            dists = [(l2(vec_of(nid), centroid_vec), nid) for nid in candidate_ids]
-            far_id = max(dists, key=lambda x: x[0])[1]
-            pivots.append(vec_of(far_id))
-        # 第三个：垂直或 max-min
-        if self.num_pivots >= 3 and len(candidate_ids) >= 3:
-            if self.pivot_strategy == "line_perp_third" and len(pivots) >= 2:
-                a, b = pivots[0], pivots[1]
-                ab = b - a
-                ab_norm = np.linalg.norm(ab) + 1e-12
-                ab_unit = ab / ab_norm
-                best = None
-                best_perp = -1.0
-                for nid in candidate_ids:
-                    v = vec_of(nid)
-                    proj_len = np.dot(v - a, ab_unit)
-                    proj = a + proj_len * ab_unit
-                    perp = np.linalg.norm(v - proj)
-                    if perp > best_perp:
-                        best_perp = perp
-                        best = v
-                if best is not None:
-                    pivots.append(best)
-            # 如果还不够或策略不同，用 max-min 拓展
-        while len(pivots) < self.num_pivots and len(candidate_ids) > len(pivots):
-            best_candidate = None
-            best_min_dist = -1.0
-            for nid in candidate_ids:
-                v = vec_of(nid)
-                min_d = min(l2(v, p) for p in pivots)
-                if min_d > best_min_dist:
-                    best_min_dist = min_d
-                    best_candidate = v
-            if best_candidate is None:
-                break
-            pivots.append(best_candidate)
+        # Select pivots
+        pivots: List[np.ndarray] = []
+        if self.pivot_strategy == "max_min_distance" and members:
+            first = random.choice(members)
+            pivots.append(member_vecs[first])
+            while len(pivots) < min(self.num_pivots, len(members)):
+                best_nid = None
+                best_min = -1.0
+                for nid in members:
+                    v = member_vecs[nid]
+                    dmin = min(l2(v, p) for p in pivots)
+                    if dmin > best_min:
+                        best_min = dmin
+                        best_nid = nid
+                if best_nid is None:
+                    break
+                pivots.append(member_vecs[best_nid])
+        else:
+            sample = random.sample(members, min(self.num_pivots, len(members)))
+            pivots = [member_vecs[nid] for nid in sample]
 
-        # 基于 min 距离进行候选打分
+        # Score each member by min distance to any pivot
         scored: List[Tuple[float, int]] = []
-        for nid in candidate_ids:
-            v = vec_of(nid)
-            min_d = min(l2(v, p) for p in pivots)
-            scored.append((min_d, nid))
+        for nid, vec in member_vecs.items():
+            dmin = min(l2(vec, p) for p in pivots)
+            scored.append((dmin, nid))
         scored.sort(key=lambda x: x[0])
         return [nid for _, nid in scored[:k_children]]
 
@@ -282,6 +264,7 @@ class HybridStrategy(BaseAssignmentStrategy):
             "fanout": self.fanout,
             "used_level": self.use_level,
             "parent_source": self._parent_source,
+            "parent_count": len(self._parent_ids) if self._parent_ids else None,
         }
 
     def _parents_from_level(self, shared: SharedContext) -> Optional[List[int]]:
@@ -346,13 +329,18 @@ class TwoStageIndex:
         self.strategy = strategy
         self.adaptive = adaptive or {}
         self.parent_child: Dict[str, List[int]] = {}
-        self._build()
+        # instrumentation fields (captured during _build)
+        self._pre_repair_child_total: Optional[int] = None
+        self._post_repair_child_total: Optional[int] = None
+        self._pre_repair_coverage: Optional[float] = None
+        self._post_repair_coverage: Optional[float] = None
         self.search_times: List[float] = []
+        self._build()
 
-    def _build(self):
+    def _build(self) -> None:
         k_children = self.shared.params.get("k_children", 100)
         child_search_ef = self.shared.params.get("child_search_ef") or max(k_children + 10, int(k_children * 1.3))
-        # 如果策略有 prepare 钩子（如 Hybrid），先执行
+        # strategy prepare hook (e.g. Hybrid) if present
         if hasattr(self.strategy, "prepare"):
             try:
                 self.strategy.prepare(self.shared)  # type: ignore
@@ -360,16 +348,21 @@ class TwoStageIndex:
                 pass
         centroids = self.shared.centroids
         for cid, centroid_vec in enumerate(centroids):
-            children = self.strategy.assign_children(
-                cid, centroid_vec, self.shared, k_children, child_search_ef
-            )
+            children = self.strategy.assign_children(cid, centroid_vec, self.shared, k_children, child_search_ef)
             self.parent_child[f"centroid_{cid}"] = children
+        # pre-repair instrumentation
+        self._pre_repair_child_total = sum(len(v) for v in self.parent_child.values())
+        pre_stats = compute_assignment_stats(self.parent_child, self.shared.base_index)
+        self._pre_repair_coverage = pre_stats.get("coverage_fraction")
         # optional repair
         if self.adaptive.get("repair_min_assignments"):
             self._repair(self.adaptive["repair_min_assignments"])
+        # post-repair instrumentation
+        self._post_repair_child_total = sum(len(v) for v in self.parent_child.values())
+        post_stats = compute_assignment_stats(self.parent_child, self.shared.base_index)
+        self._post_repair_coverage = post_stats.get("coverage_fraction")
 
-    def _repair(self, min_assign: int):
-        # 统计次数
+    def _repair(self, min_assign: int) -> None:
         counts: Dict[int, int] = {}
         for children in self.parent_child.values():
             for c in children:
@@ -378,7 +371,6 @@ class TwoStageIndex:
         need = {nid for nid in all_nodes if counts.get(nid, 0) < min_assign}
         if not need:
             return
-        # 简单策略：对 need 节点找到最近质心分配进去
         centroid_matrix = self.shared.centroids
         for nid in need:
             vec = self.shared.node_vectors[self.shared.node_ids.index(nid)]
@@ -391,17 +383,14 @@ class TwoStageIndex:
     def search(self, query: np.ndarray, k: int = 10, n_probe: int = 5) -> List[Tuple[int, float]]:
         t0 = time.time()
         centroid_matrix = self.shared.centroids
-        diffs = centroid_matrix - query
-        dists = np.linalg.norm(diffs, axis=1)
+        dists = np.linalg.norm(centroid_matrix - query, axis=1)
         probe_idx = np.argsort(dists)[: min(n_probe, len(centroid_matrix))]
         candidate_ids: List[int] = []
         for idx in probe_idx:
             candidate_ids.extend(self.parent_child.get(f"centroid_{idx}", []))
-        # 去重
-        candidate_ids = list(dict.fromkeys(candidate_ids))
+        candidate_ids = list(dict.fromkeys(candidate_ids))  # deduplicate
         if not candidate_ids:
             return []
-        # 取向量并计算距离
         nid_to_vec_idx = {nid: i for i, nid in enumerate(self.shared.node_ids)}
         vecs = np.vstack([self.shared.node_vectors[nid_to_vec_idx[nid]] for nid in candidate_ids])
         cdists = np.linalg.norm(vecs - query, axis=1)
@@ -423,6 +412,10 @@ class TwoStageIndex:
             {
                 "n_clusters": int(self.shared.centroids.shape[0]),
                 "k_children": int(self.shared.params.get("k_children", 100)),
+                "pre_repair_child_total": self._pre_repair_child_total,
+                "post_repair_child_total": self._post_repair_child_total,
+                "pre_repair_coverage": self._pre_repair_coverage,
+                "post_repair_coverage": self._post_repair_coverage,
             }
         )
         return base_stats
@@ -589,6 +582,7 @@ def main():  # pragma: no cover
         return {
             "phase": "baseline_hnsw",
             "k": k,
+            "n_probe": None,  # 对齐其他策略的 schema，baseline 无 n_probe 概念
             "ef": ef,
             "recall_at_k": (correct / total) if total else 0.0,
             "avg_individual_recall": float(np.mean(per)),
@@ -674,7 +668,7 @@ def main():  # pragma: no cover
                 writer.writerow([
                     m_name,
                     ev['k'],
-                    ev['n_probe'],
+                    ev.get('n_probe',''),
                     f"{ev['recall_at_k']:.6f}",
                     f"{ev['avg_individual_recall']:.6f}",
                     f"{ev['std_individual_recall']:.6f}",
@@ -710,6 +704,45 @@ def main():  # pragma: no cover
     print(f"Saved results -> {args.out}")
     print(f"CSV evaluations -> {eval_csv}")
     print(f"CSV summary -> {summary_csv}")
+
+    # ------------------------------------------------------------
+    # Inline summary print (requested metrics)
+    # ------------------------------------------------------------
+    if 'hybrid' in methods and 'single' in methods:
+        h_stats = methods['hybrid']['system_stats']
+        s_stats = methods['single']['system_stats']
+        print("\n==== Summary (Hybrid vs Single) ====")
+        print(f"Hybrid parent_count={h_stats.get('parent_count')} fanout={h_stats.get('fanout')} level_used={h_stats.get('used_level')}")
+        print(f"Hybrid pre/post child_total: {h_stats.get('pre_repair_child_total')} -> {h_stats.get('post_repair_child_total')} (Δ={h_stats.get('post_repair_child_total') - h_stats.get('pre_repair_child_total',0) if h_stats.get('pre_repair_child_total') is not None else 'NA'})")
+        if h_stats.get('pre_repair_child_total'):
+            delta_pct = (h_stats['post_repair_child_total'] - h_stats['pre_repair_child_total']) / h_stats['pre_repair_child_total'] * 100.0
+            print(f"  (+{delta_pct:.2f}% assignments after repair)")
+        print(f"Hybrid coverage: {h_stats.get('pre_repair_coverage')} -> {h_stats.get('post_repair_coverage')}  duplication_rate={h_stats.get('duplication_rate'):.4f}")
+        print(f"Single pre/post child_total: {s_stats.get('pre_repair_child_total')} -> {s_stats.get('post_repair_child_total')}")
+        print(f"Single coverage: {s_stats.get('pre_repair_coverage')} -> {s_stats.get('post_repair_coverage')}  duplication_rate={s_stats.get('duplication_rate'):.4f}")
+        # Recall per n_probe (k first element of k_list)
+        k_val = k_list[0]
+        def collect_recall(m_name: str):
+            ret = {}
+            for ev in methods[m_name]['evaluations']:
+                if ev['k'] == k_val:
+                    ret[ev['n_probe']] = ev['recall_at_k']
+            return ret
+        h_recall = collect_recall('hybrid')
+        s_recall = collect_recall('single')
+        probes = sorted(set(h_recall.keys()) | set(s_recall.keys()))
+        print("n_probe  single  hybrid  delta  hybrid_parent_cover  single_parent_cover")
+        for p in probes:
+            sr = s_recall.get(p)
+            hr = h_recall.get(p)
+            delta = (hr - sr) if (hr is not None and sr is not None) else None
+            # parent counts
+            h_pc = h_stats.get('parent_count') or 1
+            s_pc = s_stats.get('n_clusters') or 1
+            h_cover = f"{p/h_pc:.3f}" if h_pc else 'NA'
+            s_cover = f"{p/s_pc:.3f}" if s_pc else 'NA'
+            print(f"{p:>6}  {sr:.3f}  {hr:.3f}  {delta:+.3f}  {h_cover}  {s_cover}")
+        print("===================================\n")
 
 
 if __name__ == "__main__":  # pragma: no cover

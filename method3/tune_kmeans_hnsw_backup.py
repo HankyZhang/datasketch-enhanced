@@ -386,6 +386,25 @@ class KMeansHNSWEvaluator:
                         phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_hybrid'})
                         print(f"  [K-Means HNSW混合/Hybrid] k={k} n_probe={n_probe} recall={eval_result['recall_at_k']:.4f} avg_time={eval_result['avg_query_time_ms']:.2f}ms")
 
+                # Phase 5: Multi-Pivot K-Means评估 (Multi-Pivot K-Means evaluation) - 可选
+                multi_pivot_config = adaptive_config.get('multi_pivot_config', {})
+                if multi_pivot_config.get('enabled', False):
+                    print(f"  评估Multi-Pivot K-Means (pivots={multi_pivot_config.get('num_pivots', 3)})")
+                    for k in k_values:
+                        for n_probe in n_probe_values:
+                            mp_eval = self._evaluate_multi_pivot_kmeans_from_existing(
+                                kmeans_hnsw,
+                                k,
+                                ground_truths[k],
+                                n_probe=n_probe,
+                                num_pivots=multi_pivot_config.get('num_pivots', 3),
+                                pivot_selection_strategy=multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third'),
+                                pivot_overquery_factor=multi_pivot_config.get('pivot_overquery_factor', 1.2)
+                            )
+                            mp_eval['phase'] = 'multi_pivot_kmeans'
+                            phase_records.append({**mp_eval, 'k': k})
+                            print(f"  [Multi-Pivot K-Means] k={k} n_probe={n_probe} pivots={multi_pivot_config.get('num_pivots', 3)} recall={mp_eval['recall_at_k']:.4f} avg_time={mp_eval['avg_query_time_ms']:.2f}ms")
+
                 # 收集此参数组合的所有评估结果 (Collect all evaluation results for this parameter combination)
                 combination_results = {
                     'parameters': params,
@@ -500,6 +519,277 @@ class KMeansHNSWEvaluator:
             'reused_existing_clustering': True
         }
 
+    def _evaluate_multi_pivot_kmeans_from_existing(
+        self, 
+        kmeans_hnsw: KMeansHNSW, 
+        k: int, 
+        ground_truth: Dict, 
+        n_probe: int = 1,
+        num_pivots: int = 3,
+        pivot_selection_strategy: str = 'line_perp_third',
+        pivot_overquery_factor: float = 1.2
+    ) -> Dict[str, Any]:
+        """
+        使用KMeansHNSW内部已有的聚类结果评估Multi-Pivot K-Means性能
+        复用相同的K-Means聚类，但使用Multi-Pivot策略选择子节点
+        
+        Evaluate Multi-Pivot K-Means using existing clustering results from KMeansHNSW.
+        Reuses the same K-Means clustering but applies Multi-Pivot strategy for child selection.
+        """
+        print(f"Evaluating Multi-Pivot K-Means (pivots={num_pivots}, strategy={pivot_selection_strategy}, n_probe={n_probe})...")
+        
+        # 复用KMeansHNSW的聚类结果
+        kmeans_model = kmeans_hnsw.kmeans_model
+        centers = kmeans_model.cluster_centers_
+        n_clusters = centers.shape[0]
+        
+        # Base index and dataset
+        base_index = kmeans_hnsw.base_index
+        kmeans_dataset = kmeans_hnsw._extract_dataset_vectors()
+        labels = kmeans_model.labels_
+        
+        # 构建聚类到成员的映射
+        clusters = [[] for _ in range(n_clusters)]
+        dataset_idx_to_original_id = list(base_index.keys())
+        
+        for dataset_idx, cluster_id in enumerate(labels):
+            original_id = dataset_idx_to_original_id[dataset_idx]
+            clusters[cluster_id].append((dataset_idx, original_id))
+        
+        # 为每个聚类使用Multi-Pivot策略分配子节点
+        cluster_children_map = {}
+        overquery_k = max(10, int(kmeans_hnsw.k_children * pivot_overquery_factor))
+        
+        for cluster_idx in range(n_clusters):
+            centroid = centers[cluster_idx]
+            # 使用Multi-Pivot策略分配子节点
+            children = self._assign_children_multi_pivot(
+                base_index, centroid, overquery_k, kmeans_hnsw.k_children,
+                num_pivots, pivot_selection_strategy, kmeans_hnsw.child_search_ef
+            )
+            cluster_children_map[cluster_idx] = children
+        
+        # 执行查询评估
+        query_times = []
+        total_correct = 0
+        total_expected = len(self.query_set) * k
+        individual_recalls = []
+        
+        n_probe_eff = min(n_probe, n_clusters)
+        
+        for query_vector, query_id in zip(self.query_set, self.query_ids):
+            search_start = time.time()
+            
+            # Stage 1: 选择最近的n_probe个聚类中心
+            diffs = centers - query_vector
+            distances_to_centroids = np.linalg.norm(diffs, axis=1)
+            probe_centroids = np.argpartition(distances_to_centroids, n_probe_eff - 1)[:n_probe_eff]
+            probe_centroids = probe_centroids[np.argsort(distances_to_centroids[probe_centroids])]
+            
+            # Stage 2: 收集所有被探测聚类的Multi-Pivot分配的子节点
+            all_candidates = []
+            for cluster_idx in probe_centroids:
+                children = cluster_children_map.get(cluster_idx, [])
+                for child_id in children:
+                    if child_id != query_id and child_id in base_index:  # 排除查询本身
+                        child_vec = base_index[child_id]
+                        dist = np.linalg.norm(child_vec - query_vector)
+                        all_candidates.append((dist, child_id))
+            
+            # 按距离排序并取top-k
+            all_candidates.sort(key=lambda x: x[0])
+            results = all_candidates[:k]
+            found_neighbors = {child_id for _, child_id in results}
+            
+            search_time = time.time() - search_start
+            query_times.append(search_time)
+            
+            # 计算召回率
+            true_neighbors = {neighbor_id for _, neighbor_id in ground_truth[query_id]}
+            correct = len(true_neighbors & found_neighbors)
+            total_correct += correct
+            individual_recalls.append(correct / k if k > 0 else 0.0)
+        
+        overall_recall = total_correct / total_expected if total_expected > 0 else 0.0
+        
+        return {
+            'method': 'multi_pivot_kmeans_from_existing',
+            'recall_at_k': overall_recall,
+            'total_correct': total_correct,
+            'total_expected': total_expected,
+            'individual_recalls': individual_recalls,
+            'avg_individual_recall': float(np.mean(individual_recalls)),
+            'std_individual_recall': float(np.std(individual_recalls)),
+            'avg_query_time_ms': float(np.mean(query_times) * 1000),
+            'std_query_time_ms': float(np.std(query_times) * 1000),
+            'clustering_time': 0.0,  # 没有重新聚类，时间为0
+            'n_clusters': n_clusters,
+            'n_probe': n_probe_eff,
+            'k': k,
+            'num_pivots': num_pivots,
+            'pivot_selection_strategy': pivot_selection_strategy,
+            'pivot_overquery_factor': pivot_overquery_factor,
+            'reused_existing_clustering': True
+        }
+
+    def _assign_children_multi_pivot(
+        self, 
+        base_index: HNSW, 
+        centroid: np.ndarray, 
+        overquery_k: int,
+        final_k: int,
+        num_pivots: int = 3,
+        pivot_selection_strategy: str = 'line_perp_third',
+        child_search_ef: Optional[int] = None
+    ) -> List[int]:
+        """
+        Multi-Pivot子节点分配策略
+        基于多个pivot点的查询结果统一排序选择最终的子节点
+        """
+        if child_search_ef is None:
+            child_search_ef = max(overquery_k + 10, int(overquery_k * 1.3))
+        
+        # Pivot 0: centroid本身
+        try:
+            pivot_results = base_index.query(centroid, k=overquery_k, ef=child_search_ef)
+            S_A = [nid for nid, _ in pivot_results]
+            pivots = [centroid]
+            pivot_ids = []
+            neighbors_sets = [S_A]
+        except Exception:
+            # 如果查询失败，回退到单pivot
+            return []
+        
+        if num_pivots == 1 or not S_A:
+            # 单pivot情况，直接返回
+            return S_A[:final_k]
+        
+        eps = 1e-8
+        
+        # 选择额外的pivot点
+        for p_idx in range(1, num_pivots):
+            union_candidates = list({nid for s in neighbors_sets for nid in s})
+            if not union_candidates:
+                break
+                
+            if p_idx == 1:
+                # Pivot B: 距离A最远的点
+                A_vec = pivots[0]
+                max_dist = -1.0
+                chosen_id = S_A[0] if S_A else None
+                
+                for nid in S_A:
+                    if nid in base_index:
+                        vec = base_index[nid]
+                        dist = np.linalg.norm(A_vec - vec)
+                        if dist > max_dist:
+                            max_dist = dist
+                            chosen_id = nid
+                
+                if chosen_id is not None and chosen_id in base_index:
+                    chosen_vec = base_index[chosen_id]
+                    pivots.append(chosen_vec)
+                    pivot_ids.append(chosen_id)
+                    
+                    # 使用Pivot B查询
+                    try:
+                        pivot_b_results = base_index.query(chosen_vec, k=overquery_k, ef=child_search_ef)
+                        S_B = [nid for nid, _ in pivot_b_results]
+                        neighbors_sets.append(S_B)
+                    except Exception:
+                        pass
+                        
+            elif p_idx == 2 and pivot_selection_strategy == 'line_perp_third' and len(pivots) >= 2:
+                # Pivot C: 垂直距离AB最大的点
+                A_vec = pivots[0]
+                B_vec = pivots[1]
+                v = B_vec - A_vec
+                v_norm_sq = float(np.dot(v, v))
+                
+                if v_norm_sq < eps:
+                    # 如果A和B太近，使用贪心策略
+                    max_min_dist = -1.0
+                    chosen_id = None
+                    for nid in union_candidates:
+                        if nid in pivot_ids or nid not in base_index:
+                            continue
+                        vec = base_index[nid]
+                        min_dist = min(np.linalg.norm(vec - p) for p in pivots)
+                        if min_dist > max_min_dist:
+                            max_min_dist = min_dist
+                            chosen_id = nid
+                else:
+                    # 计算垂直距离
+                    max_perp = -1.0
+                    chosen_id = None
+                    for nid in union_candidates:
+                        if nid in pivot_ids or nid not in base_index:
+                            continue
+                        X = base_index[nid]
+                        diffA = X - A_vec
+                        coeff = np.dot(diffA, v) / v_norm_sq
+                        proj = coeff * v
+                        perp = diffA - proj
+                        pd = np.linalg.norm(perp)
+                        if pd > max_perp:
+                            max_perp = pd
+                            chosen_id = nid
+                
+                if chosen_id is not None and chosen_id in base_index:
+                    chosen_vec = base_index[chosen_id]
+                    pivots.append(chosen_vec)
+                    pivot_ids.append(chosen_id)
+                    
+                    # 使用Pivot C查询
+                    try:
+                        pivot_c_results = base_index.query(chosen_vec, k=overquery_k, ef=child_search_ef)
+                        S_C = [nid for nid, _ in pivot_c_results]
+                        neighbors_sets.append(S_C)
+                    except Exception:
+                        pass
+                        
+            else:
+                # 后续pivot使用max-min-distance策略
+                max_min_dist = -1.0
+                chosen_id = None
+                for nid in union_candidates:
+                    if nid in pivot_ids or nid not in base_index:
+                        continue
+                    vec = base_index[nid]
+                    min_dist = min(np.linalg.norm(vec - p) for p in pivots)
+                    if min_dist > max_min_dist:
+                        max_min_dist = min_dist
+                        chosen_id = nid
+                
+                if chosen_id is not None and chosen_id in base_index:
+                    chosen_vec = base_index[chosen_id]
+                    pivots.append(chosen_vec)
+                    pivot_ids.append(chosen_id)
+                    
+                    # 使用新pivot查询
+                    try:
+                        new_pivot_results = base_index.query(chosen_vec, k=overquery_k, ef=child_search_ef)
+                        new_set = [nid for nid, _ in new_pivot_results]
+                        neighbors_sets.append(new_set)
+                    except Exception:
+                        pass
+        
+        # 统一所有pivot查询结果，按到最近pivot的距离排序
+        union_candidates = list({nid for s in neighbors_sets for nid in s})
+        scored_candidates = []
+        
+        for nid in union_candidates:
+            if nid not in base_index:
+                continue
+            vec = base_index[nid]
+            # 计算到所有pivot的最小距离
+            min_dist_to_pivot = min(np.linalg.norm(vec - p) for p in pivots)
+            scored_candidates.append((min_dist_to_pivot, nid))
+        
+        # 按最小距离排序，取前final_k个
+        scored_candidates.sort(key=lambda x: x[0])
+        return [nid for _, nid in scored_candidates[:final_k]]
+
 
 def save_results(results: Dict[str, Any], filename: str):
     """Save evaluation results to JSON file."""
@@ -612,11 +902,23 @@ if __name__ == "__main__":
                         help='在最优构建后运行手动修复 (Run manual repair after optimal build)')
     parser.add_argument('--manual-repair-min', type=int, default=None, 
                         help='手动修复的最小分配数 (Min assignments for manual repair)')
+    
+    # Multi-Pivot选项 (Multi-Pivot options)
+    parser.add_argument('--enable-multi-pivot', action='store_true',
+                        help='启用Multi-Pivot K-Means评估 (Enable Multi-Pivot K-Means evaluation)')
+    parser.add_argument('--num-pivots', type=int, default=3,
+                        help='每个聚类的pivot数量 (默认: 3) (Number of pivots per cluster)')
+    parser.add_argument('--pivot-selection-strategy', type=str, default='line_perp_third',
+                        choices=['line_perp_third', 'max_min_distance'],
+                        help='Pivot选择策略 (Pivot selection strategy)')
+    parser.add_argument('--pivot-overquery-factor', type=float, default=1.2,
+                        help='Pivot查询的过度查询因子 (默认: 1.2) (Overquery factor for pivot queries)')
     args = parser.parse_args()
 
     print("🔬 K-Means HNSW参数调优和评估系统 (K-Means HNSW Parameter Tuning and Evaluation)")
     print(f"📊 请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
     print(f"   Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
+    print(f"🎯 Multi-Pivot评估: {'启用' if args.enable_multi_pivot else '禁用'} {'(' + str(args.num_pivots) + ' pivots, ' + args.pivot_selection_strategy + ')' if args.enable_multi_pivot else ''}")
     
     # 尝试加载SIFT数据，失败则使用合成数据 (Try to load SIFT data, fall back to synthetic unless disabled)
     base_vectors, query_vectors = (None, None)
@@ -688,7 +990,14 @@ if __name__ == "__main__":
         'k_children_min': args.k_children_min,
         'k_children_max': args.k_children_max,
         'diversify_max_assignments': args.diversify_max_assignments,
-        'repair_min_assignments': args.repair_min_assignments
+        'repair_min_assignments': args.repair_min_assignments,
+        # Multi-Pivot配置
+        'multi_pivot_config': {
+            'enabled': args.enable_multi_pivot,
+            'num_pivots': args.num_pivots,
+            'pivot_selection_strategy': args.pivot_selection_strategy,
+            'pivot_overquery_factor': args.pivot_overquery_factor
+        }
     }
     
     sweep_results = evaluator.parameter_sweep(
@@ -722,14 +1031,30 @@ if __name__ == "__main__":
                 'manual_repair': args.manual_repair,
                 'manual_repair_min': args.manual_repair_min
             },
+            'multi_pivot_config': {
+                'enabled': args.enable_multi_pivot,
+                'num_pivots': args.num_pivots,
+                'pivot_selection_strategy': args.pivot_selection_strategy,
+                'pivot_overquery_factor': args.pivot_overquery_factor
+            },
             'evaluation_info': {
                 'dataset_size': len(base_vectors),
                 'query_size': len(query_vectors),
                 'dimension': base_vectors.shape[1],
+                'multi_pivot_enabled': args.enable_multi_pivot,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
         }
         
-        save_results(results, 'method3_tuning_results.json')
+        output_filename = 'method3_tuning_with_multi_pivot_results.json' if args.enable_multi_pivot else 'method3_tuning_results.json'
+        save_results(results, output_filename)
         
     print("\nParameter tuning completed!")
+    if args.enable_multi_pivot:
+        print("🎯 Multi-Pivot evaluation included in results:")
+        print("   Phase 1: HNSW基线 (HNSW Baseline)")
+        print("   Phase 2: 纯K-Means (Pure K-Means)")  
+        print("   Phase 3: K-Means HNSW混合 (K-Means HNSW Hybrid)")
+        print("   Phase 4: Multi-Pivot K-Means (使用相同聚类)")
+    else:
+        print("💡 提示: 使用 --enable-multi-pivot 启用Multi-Pivot K-Means评估")

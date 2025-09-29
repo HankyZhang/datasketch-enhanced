@@ -148,7 +148,9 @@ class KMeansHNSW:
             'avg_children_per_centroid': 0.0,
             'coverage_fraction': 0.0,
             'avg_search_time_ms': 0.0,
-            'avg_candidate_size': 0.0
+            'avg_candidate_size': 0.0,
+            'shared_kmeans_used': shared_kmeans_model is not None,
+            'shared_data_used': shared_dataset_vectors is not None
         }
         self.search_times = []
         self.candidate_sizes = []
@@ -210,7 +212,11 @@ class KMeansHNSW:
               f"{self.stats['avg_children_per_centroid']:.1f} avg children/cluster")
     
     def _extract_dataset_vectors(self) -> np.ndarray:
-        """Extract all vectors from the base HNSW index."""
+        """Extract all vectors from the base HNSW index (支持共享数据向量)."""
+        if self.shared_dataset_vectors is not None:
+            print("Using shared dataset vectors...")
+            return self.shared_dataset_vectors
+        
         vectors = []
         for key in self.base_index:
             if key in self.base_index:  # Check not soft-deleted
@@ -223,6 +229,37 @@ class KMeansHNSW:
     
     def _perform_kmeans_clustering(self, dataset_vectors: np.ndarray):
         """Perform MiniBatchKMeans clustering to identify parent centroids."""
+        # 检查是否有共享的K-Means模型
+        if self.shared_kmeans_model is not None:
+            print(f"Using shared MiniBatchKMeans model with {self.n_clusters} clusters...")
+            self.kmeans_model = self.shared_kmeans_model
+            self.centroids = self.kmeans_model.cluster_centers_
+            self.n_clusters = self.centroids.shape[0]  # 使用实际的聚类数量
+            self.centroid_ids = [f"centroid_{i}" for i in range(self.n_clusters)]
+            
+            # 使用共享的数据向量计算聚类统计信息
+            if self.shared_dataset_vectors is not None:
+                labels = self.shared_kmeans_model.predict(self.shared_dataset_vectors)
+                cluster_sizes = np.bincount(labels, minlength=self.n_clusters)
+                self._cluster_info = {
+                    'avg_cluster_size': float(np.mean(cluster_sizes)),
+                    'std_cluster_size': float(np.std(cluster_sizes)),
+                    'min_cluster_size': int(np.min(cluster_sizes)),
+                    'max_cluster_size': int(np.max(cluster_sizes)),
+                    'inertia': float(self.kmeans_model.inertia_),
+                    'n_iterations': int(getattr(self.kmeans_model, 'n_iter_', 0)),
+                }
+                print(
+                    f"Shared MiniBatchKMeans inertia: {self._cluster_info['inertia']:.2f}; "
+                    f"Cluster sizes - Avg: {self._cluster_info['avg_cluster_size']:.1f}, "
+                    f"Min: {self._cluster_info['min_cluster_size']}, "
+                    f"Max: {self._cluster_info['max_cluster_size']}"
+                )
+            else:
+                print(f"Shared MiniBatchKMeans inertia: {self.kmeans_model.inertia_:.2f}")
+            return
+        
+        # 原有的K-Means训练逻辑
         print(f"Running MiniBatchKMeans with {self.n_clusters} clusters...")
 
         params = self.kmeans_params.copy()

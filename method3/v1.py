@@ -21,6 +21,7 @@ import time
 import json
 import argparse
 import random
+import traceback
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from itertools import product
@@ -58,7 +59,10 @@ class KMeansHNSWMultiPivot:
         k_children_min: int = 100,
         k_children_max: Optional[int] = None,
         diversify_max_assignments: Optional[int] = None,
-        repair_min_assignments: Optional[int] = None
+        repair_min_assignments: Optional[int] = None,
+        # Shared K-Means support (新增共享支持)
+        shared_kmeans_model: Optional[MiniBatchKMeans] = None,
+        shared_dataset_vectors: Optional[np.ndarray] = None
     ):
         self.base_index = base_index
         self.n_clusters = n_clusters
@@ -77,6 +81,10 @@ class KMeansHNSWMultiPivot:
         self.k_children_max = k_children_max
         self.diversify_max_assignments = diversify_max_assignments
         self.repair_min_assignments = repair_min_assignments
+        
+        # Shared K-Means support (新增共享支持)
+        self.shared_kmeans_model = shared_kmeans_model
+        self.shared_dataset_vectors = shared_dataset_vectors
         
         # Child search ef
         if child_search_ef is None:
@@ -101,7 +109,9 @@ class KMeansHNSWMultiPivot:
             'child_search_ef': self.child_search_ef,
             'num_pivots': self.num_pivots,
             'pivot_strategy': self.pivot_selection_strategy,
-            'pivot_overquery_factor': self.pivot_overquery_factor
+            'pivot_overquery_factor': self.pivot_overquery_factor,
+            'shared_kmeans_used': shared_kmeans_model is not None,
+            'shared_data_used': shared_dataset_vectors is not None
         }
         self.search_times = []
         
@@ -110,7 +120,13 @@ class KMeansHNSWMultiPivot:
     
     def _build_system(self):
         """构建多枢纽K-Means HNSW系统"""
-        print(f"Building Multi-Pivot K-Means HNSW system with {self.n_clusters} clusters, {self.num_pivots} pivots...")
+        shared_info = ""
+        if self.shared_kmeans_model is not None:
+            shared_info += " (共享K-Means模型)"
+        if self.shared_dataset_vectors is not None:
+            shared_info += " (共享数据向量)"
+            
+        print(f"Building Multi-Pivot K-Means HNSW system with {self.n_clusters} clusters, {self.num_pivots} pivots{shared_info}...")
         
         # Step 1: Extract vectors from HNSW index
         self._extract_dataset_vectors()
@@ -127,7 +143,12 @@ class KMeansHNSWMultiPivot:
         print(f"Multi-Pivot K-Means HNSW system built with {len(self.parent_child_map)} centroids")
     
     def _extract_dataset_vectors(self):
-        """从HNSW索引提取向量数据 (复用KMeansHNSW的逻辑)"""
+        """从HNSW索引提取向量数据 (支持共享数据向量)"""
+        if self.shared_dataset_vectors is not None:
+            print("  Using shared dataset vectors...")
+            self.dataset_vectors = self.shared_dataset_vectors
+            return
+        
         dataset_vectors = []
         for node_id, node in self.base_index._nodes.items():
             vector = node.point
@@ -136,12 +157,21 @@ class KMeansHNSWMultiPivot:
         self.dataset_vectors = np.array(dataset_vectors)
     
     def _perform_kmeans_clustering(self):
-        """执行K-Means聚类 (复用KMeansHNSW的逻辑)"""
-        actual_clusters = min(self.n_clusters, len(self.dataset_vectors))
+        """执行K-Means聚类 (支持共享模型)"""
+        # Multi-Pivot必须使用共享的K-Means模型 (Multi-Pivot must use shared K-Means model)
+        if self.shared_kmeans_model is None:
+            raise ValueError("Multi-Pivot KMeans HNSW requires a shared_kmeans_model. "
+                           "Please provide a pre-trained MiniBatchKMeans model.")
         
-        # 自适应调整k_children
+        print("  Using shared MiniBatchKMeans model...")
+        self.kmeans_model = self.shared_kmeans_model
+        self.centroids = self.kmeans_model.cluster_centers_
+        self.n_clusters = self.centroids.shape[0]
+        self.centroid_ids = [f"centroid_{i}" for i in range(self.n_clusters)]
+        
+        # 自适应调整k_children (基于共享模型的聚类数量)
         if self.adaptive_k_children:
-            avg_cluster_size = len(self.dataset_vectors) / actual_clusters
+            avg_cluster_size = len(self.dataset_vectors) / self.n_clusters
             adaptive_k = int(avg_cluster_size * self.k_children_scale)
             adaptive_k = max(self.k_children_min, adaptive_k)
             if self.k_children_max:
@@ -149,20 +179,7 @@ class KMeansHNSWMultiPivot:
             self.k_children = adaptive_k
             print(f"  自适应调整k_children: {self.k_children} (平均聚类大小: {avg_cluster_size:.1f})")
         
-        self.kmeans_model = MiniBatchKMeans(
-            n_clusters=actual_clusters,
-            random_state=42,
-            max_iter=100,
-            batch_size=min(100, len(self.dataset_vectors))
-        )
-        
-        print(f"Running MiniBatchKMeans with {actual_clusters} clusters...")
-        self.kmeans_model.fit(self.dataset_vectors)
-        self.centroids = self.kmeans_model.cluster_centers_
-        self.n_clusters = actual_clusters
-        self.centroid_ids = [f"centroid_{i}" for i in range(actual_clusters)]
-        
-        print(f"K-Means clustering completed with {actual_clusters} clusters")
+        print(f"Shared K-Means clustering loaded with {self.n_clusters} clusters")
     
     def _assign_children_via_multi_pivot(self):
         """使用多枢纽策略分配子节点"""
@@ -867,16 +884,19 @@ class KMeansHNSWEvaluator:
                 'pivot_overquery_factor': 1.2
             }
 
-        print("开始K-Means HNSW + Multi-Pivot 参数扫描...")
-        print(f"Multi-Pivot启用状态: {multi_pivot_config.get('enabled', False)}")
+        print("🔬================== 五方法对比评估系统 ==================")
+        print("📊 评估流程: HNSW → K-Means → Hybrid HNSW → KMeans HNSW → Multi-Pivot KMeans HNSW")
+        print(f"🎯 Multi-Pivot启用状态: {multi_pivot_config.get('enabled', False)}")
+        print("================================================================")
 
+        # ========== 步骤1: 准备参数组合 ==========
         param_names = list(param_grid.keys())
         param_values = list(param_grid.values())
         combinations = list(product(*param_values))
         if max_combinations and len(combinations) > max_combinations:
-            print(f"限制测试 {max_combinations} 个组合，总共 {len(combinations)} 个 (Limiting to {max_combinations} combinations out of {len(combinations)})")
+            print(f"限制测试 {max_combinations} 个组合，总共 {len(combinations)} 个")
             combinations = random.sample(combinations, max_combinations)
-        print(f"测试 {len(combinations)} 个参数组合... (Testing {len(combinations)} parameter combinations)")
+        print(f"📋 将测试 {len(combinations)} 个参数组合")
 
         results: List[Dict[str, Any]] = []
         k_values = evaluation_params.get('k_values', [10])
@@ -884,19 +904,117 @@ class KMeansHNSWEvaluator:
         hybrid_parent_level = evaluation_params.get('hybrid_parent_level', 2)
         enable_hybrid = evaluation_params.get('enable_hybrid', True)
 
-        # Precompute ground truths
+        # ========== 步骤2: 预计算真实值 (Ground Truth) ==========
+        print(f"\n🎯 步骤2: 预计算真实值 (k_values: {k_values})")
         ground_truths: Dict[int, Dict] = {}
         for k in k_values:
             ground_truths[k] = self.compute_ground_truth(k, exclude_query_ids=False)
+        
+        # ========== 步骤3: 预训练共享K-Means模型 ==========
+        print(f"\n🤖 步骤3: 预训练共享K-Means模型以避免重复计算")
+        shared_dataset_vectors = []
+        for node_id, node in base_index._nodes.items():
+            if node.point is not None:
+                shared_dataset_vectors.append(node.point)
+        shared_dataset_vectors = np.array(shared_dataset_vectors)
+        print(f"   提取了 {len(shared_dataset_vectors)} 个数据向量")
+        
+        # 为每个n_clusters值预训练K-Means模型
+        shared_kmeans_models: Dict[int, MiniBatchKMeans] = {}
+        unique_n_clusters = set(params[param_names.index('n_clusters')] for params in combinations)
+        
+        for n_clusters in unique_n_clusters:
+            print(f"   预训练K-Means模型 (n_clusters={n_clusters})...")
+            actual_clusters = min(n_clusters, len(shared_dataset_vectors))
+            kmeans_model = MiniBatchKMeans(
+                n_clusters=actual_clusters,
+                random_state=42,
+                max_iter=100,
+                batch_size=min(100, len(shared_dataset_vectors))
+            )
+            kmeans_model.fit(shared_dataset_vectors)
+            shared_kmeans_models[n_clusters] = kmeans_model
+            print(f"     ✅ 完成: {actual_clusters} clusters, inertia={kmeans_model.inertia_:.2f}")
+        
+        print(f"✅ 共享K-Means模型预训练完成 ({len(shared_kmeans_models)} 个模型)")
+        print(f"💡 K-Means模型将被所有方法重用，确保公平对比")
 
+        # ========== 步骤4: 开始参数组合评估 ==========
         for i, combination in enumerate(combinations):
-            print(f"\n--- Combination {i + 1}/{len(combinations)} ---")
+            print(f"\n🔬 =========== 参数组合 {i + 1}/{len(combinations)} ===========")
             params = dict(zip(param_names, combination))
-            print(f"Parameters: {params}")
+            print(f"📝 当前参数: {params}")
 
             try:
                 phase_records: List[Dict[str, Any]] = []
-                # Build KMeans-HNSW system
+                
+                # 获取当前组合的共享K-Means模型
+                current_n_clusters = params['n_clusters']
+                shared_model = shared_kmeans_models[current_n_clusters]
+                print(f"🤖 使用预训练的K-Means模型 (n_clusters={current_n_clusters})")
+                
+                # ========== 方法1: HNSW基线 ==========
+                print(f"\n📊 方法1: HNSW基线评估")
+                base_ef = base_index._ef_construction
+                print(f"   参数: ef={base_ef}")
+                for k in k_values:
+                    b_eval = self.evaluate_hnsw_baseline(base_index, k, base_ef, ground_truths[k])
+                    phase_records.append({**b_eval, 'k': k})
+                    print(f"   ✅ k={k}: recall={b_eval['recall_at_k']:.4f}, 时间={b_eval['avg_query_time_ms']:.2f}ms")
+
+                # ========== 方法2: 纯K-Means聚类 ==========
+                print(f"\n📊 方法2: 纯K-Means聚类评估")
+                print(f"   参数: n_clusters={current_n_clusters}, n_probe={n_probe_values}")
+                for k in k_values:
+                    for n_probe in n_probe_values:
+                        c_eval = self._evaluate_pure_kmeans_from_existing_shared(
+                            shared_model, shared_dataset_vectors, base_index,
+                            k, ground_truths[k], n_probe=n_probe
+                        )
+                        c_eval['phase'] = 'clusters_only'
+                        phase_records.append({**c_eval, 'k': k})
+                        print(f"   ✅ k={k} n_probe={n_probe}: recall={c_eval['recall_at_k']:.4f}, 时间={c_eval['avg_query_time_ms']:.2f}ms")
+
+                # ========== 方法3: Hybrid HNSW ==========
+                if enable_hybrid:
+                    print(f"\n📊 方法3: Hybrid HNSW评估")
+                    print(f"   参数: parent_level={hybrid_parent_level}, k_children={params['k_children']}")
+                    try:
+                        hybrid_build_start = time.time()
+                        hybrid_index = HNSWHybrid(
+                            base_index=base_index,
+                            parent_level=hybrid_parent_level,
+                            k_children=params['k_children'],
+                            approx_ef=params.get('child_search_ef'),
+                            parent_child_method='approx',
+                            diversify_max_assignments=adaptive_config.get('diversify_max_assignments'),
+                            repair_min_assignments=adaptive_config.get('repair_min_assignments'),
+                            adaptive_k_children=adaptive_config.get('adaptive_k_children', False),
+                            k_children_scale=adaptive_config.get('k_children_scale', 1.5),
+                            k_children_min=adaptive_config.get('k_children_min', 100),
+                            k_children_max=adaptive_config.get('k_children_max')
+                        )
+                        hybrid_build_time = time.time() - hybrid_build_start
+                        hybrid_stats = hybrid_index.get_stats()
+                        
+                        print(f"   构建完成: {hybrid_stats.get('num_parents', 0)} parents, "
+                              f"{hybrid_stats.get('num_children', 0)} children, "
+                              f"coverage: {hybrid_stats.get('coverage_fraction', 0):.4f}")
+                        
+                        for k in k_values:
+                            for n_probe in n_probe_values:
+                                h_eval = self.evaluate_hybrid_hnsw(hybrid_index, k, n_probe, ground_truths[k])
+                                h_eval['hybrid_build_time'] = hybrid_build_time
+                                h_eval['hybrid_k_children'] = hybrid_stats.get('k_children', params['k_children'])
+                                phase_records.append({**h_eval, 'k': k})
+                                print(f"   ✅ k={k} n_probe={n_probe}: recall={h_eval['recall_at_k']:.4f}, 时间={h_eval['avg_query_time_ms']:.2f}ms")
+                    except Exception as he:
+                        print(f"   ❌ Hybrid HNSW 评估失败: {he}")
+
+                # ========== 方法4: KMeans HNSW (单枢纽) ==========
+                print(f"\n📊 方法4: KMeans HNSW (单枢纽)评估")
+                print(f"   参数: n_clusters={current_n_clusters}, k_children={params['k_children']}")
+                
                 construction_start = time.time()
                 kmeans_hnsw = KMeansHNSW(
                     base_index=base_index,
@@ -906,110 +1024,28 @@ class KMeansHNSWEvaluator:
                     k_children_min=adaptive_config['k_children_min'],
                     k_children_max=adaptive_config['k_children_max'],
                     diversify_max_assignments=adaptive_config['diversify_max_assignments'],
-                    repair_min_assignments=adaptive_config['repair_min_assignments']
+                    repair_min_assignments=adaptive_config['repair_min_assignments'],
+                    shared_kmeans_model=shared_model,
+                    shared_dataset_vectors=shared_dataset_vectors
                 )
                 construction_time = time.time() - construction_start
-                print(f"  构建K-Means HNSW系统耗时 {construction_time:.2f}秒 (Built KMeansHNSW system in {construction_time:.2f}s)")
+                print(f"   构建完成 (耗时: {construction_time:.2f}秒)")
                 actual_n_clusters = kmeans_hnsw.n_clusters
 
-                # Baseline HNSW
-                base_ef = base_index._ef_construction
-                print(f"  使用base_index的ef_construction参数: {base_ef}")
-                for k in k_values:
-                    b_eval = self.evaluate_hnsw_baseline(base_index, k, base_ef, ground_truths[k])
-                    phase_records.append({**b_eval, 'k': k})
-                    print(f"  [基线HNSW/Baseline HNSW] k={k} ef={base_ef} recall={b_eval['recall_at_k']:.4f} avg_time={b_eval['avg_query_time_ms']:.2f}ms")
-
-                # Pure KMeans (reuse clustering)
-                print(f"  使用与KMeansHNSW相同的聚类参数: n_clusters={actual_n_clusters}")
-                for k in k_values:
-                    for n_probe in n_probe_values:
-                        c_eval = self._evaluate_pure_kmeans_from_existing(
-                            kmeans_hnsw,
-                            k,
-                            ground_truths[k],
-                            n_probe=n_probe
-                        )
-                        c_eval['phase'] = 'clusters_only'
-                        phase_records.append({**c_eval, 'k': k})
-                        print(f"  [仅K-Means聚类/Clusters Only] k={k} n_probe={n_probe} recall={c_eval['recall_at_k']:.4f} avg_time={c_eval['avg_query_time_ms']:.2f}ms")
-
-                # Level-based Hybrid HNSW
-                if enable_hybrid:
-                    print(f"  构建并评估Hybrid HNSW (parent_level={hybrid_parent_level}, k_children={params['k_children']})")
-                    print(f"    注意：启用自适应配置以确保与KMeansHNSW公平比较")
-                    print(f"    Note: Enabling adaptive config for fair comparison with KMeansHNSW")
-                    try:
-                        hybrid_build_start = time.time()
-                        hybrid_index = HNSWHybrid(
-                            base_index=base_index,
-                            parent_level=hybrid_parent_level,
-                            k_children=params['k_children'],
-                            approx_ef=params.get('child_search_ef'),  # This maps to HybridHNSW's approx_ef
-                            parent_child_method='approx',
-                            diversify_max_assignments=adaptive_config.get('diversify_max_assignments'),
-                            repair_min_assignments=adaptive_config.get('repair_min_assignments'),
-                            # 使用与KMeansHNSW相同的自适应配置
-                            adaptive_k_children=adaptive_config.get('adaptive_k_children', False),
-                            k_children_scale=adaptive_config.get('k_children_scale', 1.5),
-                            k_children_min=adaptive_config.get('k_children_min', 100),
-                            k_children_max=adaptive_config.get('k_children_max')
-                        )
-                        hybrid_build_time = time.time() - hybrid_build_start
-                        hybrid_stats = hybrid_index.get_stats()
-                        print(f"    Hybrid构建统计: {hybrid_stats.get('num_parents', 0)} parents, "
-                              f"{hybrid_stats.get('num_children', 0)} children, "
-                              f"coverage: {hybrid_stats.get('coverage_fraction', 0):.4f}")
-                        print(f"    实际k_children: {hybrid_stats.get('k_children', 'N/A')}, "
-                              f"实际approx_ef: {hybrid_stats.get('approx_ef', 'N/A')}")
-                        if adaptive_config.get('adaptive_k_children', False):
-                            print(f"    自适应k_children已启用 (scale={adaptive_config.get('k_children_scale', 1.5)})")
-                        
-                        # 显示repair/diversify状态
-                        if adaptive_config.get('repair_min_assignments'):
-                            print(f"    ✅ Repair功能已启用 (min_assignments={adaptive_config.get('repair_min_assignments')})")
-                        else:
-                            print(f"    ⚠️ Repair功能未启用 (repair_min_assignments=None)")
-                            print(f"    💡 提示: 启用repair功能可确保coverage=1.0")
-                        
-                        if adaptive_config.get('diversify_max_assignments'):
-                            print(f"    ✅ Diversify功能已启用 (max_assignments={adaptive_config.get('diversify_max_assignments')})")
-                        else:
-                            print(f"    ⚠️ Diversify功能未启用 (diversify_max_assignments=None)")
-                        
-                        # 检查coverage和解释
-                        coverage = hybrid_stats.get('coverage_fraction', 0)
-                        if coverage < 1.0:
-                            print(f"    ⚠️ Coverage = {coverage:.3f} < 1.0")
-                            print(f"    💡 可能原因: parent数量({hybrid_stats.get('num_parents', 0)})不足 或 k_children({hybrid_stats.get('k_children', 'N/A')})太小")
-                            if not adaptive_config.get('repair_min_assignments'):
-                                print(f"    💡 建议: 启用repair功能 --repair-min-assignments 2")
-                        else:
-                            print(f"    ✅ Coverage = {coverage:.3f} (完全覆盖)")
-                        
-                        for k in k_values:
-                            for n_probe in n_probe_values:
-                                h_eval = self.evaluate_hybrid_hnsw(hybrid_index, k, n_probe, ground_truths[k])
-                                h_eval['hybrid_build_time'] = hybrid_build_time
-                                h_eval['hybrid_k_children'] = hybrid_stats.get('k_children', params['k_children'])  # Record actual value used
-                                phase_records.append({**h_eval, 'k': k})
-                                print(f"  [Hybrid(Level)] k={k} n_probe={n_probe} recall={h_eval['recall_at_k']:.4f} avg_time={h_eval['avg_query_time_ms']:.2f}ms")
-                    except Exception as he:
-                        print(f"  ⚠️ Hybrid HNSW 构建或评估失败: {he}")
-                        print(f"    详细错误信息: {type(he).__name__}: {he}")
-                        import traceback
-                        traceback.print_exc()
-
-                # Single-pivot KMeans-HNSW hybrid
                 for k in k_values:
                     for n_probe in n_probe_values:
                         eval_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truths[k])
                         phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_single_pivot'})
-                        print(f"  [K-Means HNSW混合/Hybrid] k={k} n_probe={n_probe} recall={eval_result['recall_at_k']:.4f} avg_time={eval_result['avg_query_time_ms']:.2f}ms")
+                        print(f"   ✅ k={k} n_probe={n_probe}: recall={eval_result['recall_at_k']:.4f}, 时间={eval_result['avg_query_time_ms']:.2f}ms")
 
-                # Multi-pivot KMeans-HNSW hybrid
+
+
+
+                # ========== 方法5: Multi-Pivot KMeans HNSW ==========
                 if multi_pivot_config.get('enabled', False):
-                    print(f"  构建Multi-Pivot K-Means HNSW系统 (pivots={multi_pivot_config.get('num_pivots', 3)})...")
+                    print(f"\n📊 方法5: Multi-Pivot KMeans HNSW评估")
+                    print(f"   参数: pivots={multi_pivot_config.get('num_pivots', 3)}, "
+                          f"strategy={multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third')}")
                     try:
                         multi_pivot_start = time.time()
                         multi_pivot_hnsw = KMeansHNSWMultiPivot(
@@ -1023,67 +1059,82 @@ class KMeansHNSWEvaluator:
                             k_children_min=adaptive_config['k_children_min'],
                             k_children_max=adaptive_config['k_children_max'],
                             diversify_max_assignments=adaptive_config['diversify_max_assignments'],
-                            repair_min_assignments=adaptive_config['repair_min_assignments']
+                            repair_min_assignments=adaptive_config['repair_min_assignments'],
+                            shared_kmeans_model=shared_model,
+                            shared_dataset_vectors=shared_dataset_vectors
                         )
                         multi_pivot_build_time = time.time() - multi_pivot_start
-                        print(f"    Multi-Pivot系统构建耗时: {multi_pivot_build_time:.2f}秒")
+                        print(f"   构建完成 (耗时: {multi_pivot_build_time:.2f}秒)")
                         
                         for k in k_values:
                             for n_probe in n_probe_values:
                                 mp_eval_result = self.evaluate_multi_pivot_recall(multi_pivot_hnsw, k, n_probe, ground_truths[k])
                                 phase_records.append({**mp_eval_result, 'phase': 'kmeans_hnsw_multi_pivot', 'multi_pivot_build_time': multi_pivot_build_time})
-                                print(f"  [Multi-Pivot K-Means HNSW] k={k} n_probe={n_probe} recall={mp_eval_result['recall_at_k']:.4f} avg_time={mp_eval_result['avg_query_time_ms']:.2f}ms")
+                                print(f"   ✅ k={k} n_probe={n_probe}: recall={mp_eval_result['recall_at_k']:.4f}, 时间={mp_eval_result['avg_query_time_ms']:.2f}ms")
                     
                     except Exception as mp_e:
-                        print(f"  ⚠️ Multi-Pivot K-Means HNSW 构建或评估失败: {mp_e}")
-                        import traceback
+                        print(f"   ❌ Multi-Pivot KMeans HNSW 评估失败: {mp_e}")
                         traceback.print_exc()
 
+                # ========== 组合总结 ==========
+                print(f"\n📈 参数组合 {i + 1} 评估完成!")
+                best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
+                methods_tested = len(set(r.get('phase', r.get('method', 'unknown')) for r in phase_records))
+                print(f"   测试了 {methods_tested} 种方法，最佳召回率: {best_recall:.4f}")
+                
                 combination_results = {
                     'parameters': params,
-                    'construction_time': construction_time,
+                    'construction_time': construction_time if 'construction_time' in locals() else 0.0,
                     'phase_evaluations': phase_records,
-                    'multi_pivot_enabled': multi_pivot_config.get('enabled', False)
+                    'multi_pivot_enabled': multi_pivot_config.get('enabled', False),
+                    'best_recall': best_recall,
+                    'methods_count': methods_tested
                 }
                 results.append(combination_results)
-                best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
-                print(f"  此组合最佳召回率 (Best recall): {best_recall:.4f}")
+                
             except Exception as e:
-                print(f"❌ 参数组合 {params} 出错: {e} (Error with combination)")
+                print(f"❌ 参数组合 {params} 评估出错: {e}")
+                traceback.print_exc()
                 continue
 
-        print(f"\n🎯 参数扫描完成！测试了 {len(results)} 个组合")
-        print(f"    包含Multi-Pivot评估: {multi_pivot_config.get('enabled', False)}")
+        # ========== 最终总结 ==========
+        print(f"\n� ================== 五方法对比评估完成 ==================")
+        print(f"📊 总计测试: {len(results)} 个参数组合")
+        print(f"🎯 Multi-Pivot启用: {multi_pivot_config.get('enabled', False)}")
+        
+        if results:
+            overall_best = max(results, key=lambda x: x.get('best_recall', 0))
+            print(f"🥇 全局最佳召回率: {overall_best.get('best_recall', 0):.4f}")
+            print(f"🔧 最佳参数组合: {overall_best.get('parameters', {})}")
+        
+        print(f"================================================================")
         return results
     
-    def _evaluate_pure_kmeans_from_existing(
+
+    
+    def _evaluate_pure_kmeans_from_existing_shared(
         self, 
-        kmeans_hnsw: KMeansHNSW, 
+        kmeans_model: MiniBatchKMeans, 
+        dataset_vectors: np.ndarray,
+        base_index: HNSW,
         k: int, 
         ground_truth: Dict, 
         n_probe: int = 1
     ) -> Dict[str, Any]:
         """
-        使用KMeansHNSW内部已有的聚类结果评估纯K-Means性能
-        避免重复聚类，直接复用已训练的模型和数据映射
-        
-        Evaluate pure K-Means using existing clustering results from KMeansHNSW.
-        Avoids redundant clustering by reusing trained model and data mappings.
+        使用共享K-Means模型直接评估纯K-Means性能
+        (Evaluate pure K-Means using shared model directly)
         """
-        print(f"Reusing existing clustering from KMeansHNSW (n_clusters={kmeans_hnsw.n_clusters}, n_probe={n_probe})...")
+        print(f"    使用共享K-Means模型进行评估 (n_clusters={kmeans_model.n_clusters}, n_probe={n_probe})")
         
-        # 直接使用KMeansHNSW内部的聚类结果
-        kmeans_model = kmeans_hnsw.kmeans_model
+        # 获取聚类中心和数据标签
         centers = kmeans_model.cluster_centers_
         n_clusters = centers.shape[0]
+        labels = kmeans_model.predict(dataset_vectors)
         
-        # 获取与聚类时相同的数据集和索引映射
-        kmeans_dataset = kmeans_hnsw._extract_dataset_vectors()
-        labels = kmeans_model.labels_
-        
-        # 构建聚类到成员的映射 (与evaluate_clusters_only类似的逻辑)
+        # 构建聚类到成员的映射
         clusters = [[] for _ in range(n_clusters)]
-        dataset_idx_to_original_id = list(kmeans_hnsw.base_index.keys())
+        dataset_idx_to_original_id = list(base_index.keys())
         
         for dataset_idx, cluster_id in enumerate(labels):
             original_id = dataset_idx_to_original_id[dataset_idx]
@@ -1114,7 +1165,7 @@ class KMeansHNSWEvaluator:
                 cluster_members = clusters[cluster_idx]
                 for dataset_idx, original_id in cluster_members:
                     if original_id != query_id:  # 排除查询本身
-                        member_vec = kmeans_dataset[dataset_idx]
+                        member_vec = dataset_vectors[dataset_idx]
                         dist = np.linalg.norm(member_vec - query_vector)
                         all_candidates.append((dist, original_id))
             
@@ -1135,7 +1186,7 @@ class KMeansHNSWEvaluator:
         overall_recall = total_correct / total_expected if total_expected > 0 else 0.0
         
         return {
-            'method': 'pure_kmeans_from_existing',
+            'method': 'pure_kmeans_shared_model',
             'recall_at_k': overall_recall,
             'total_correct': total_correct,
             'total_expected': total_expected,
@@ -1144,11 +1195,11 @@ class KMeansHNSWEvaluator:
             'std_individual_recall': float(np.std(individual_recalls)),
             'avg_query_time_ms': float(np.mean(query_times) * 1000),
             'std_query_time_ms': float(np.std(query_times) * 1000),
-            'clustering_time': 0.0,  # 没有重新聚类，时间为0
+            'clustering_time': 0.0,  # 使用共享模型，时间为0
             'n_clusters': n_clusters,
             'n_probe': n_probe_eff,
             'k': k,
-            'reused_existing_clustering': True
+            'used_shared_model': True
         }
 
 
