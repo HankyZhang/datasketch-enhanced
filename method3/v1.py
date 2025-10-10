@@ -571,7 +571,6 @@ class KMeansHNSWEvaluator:
             return self._ground_truth_cache[cache_key]
         
         print(f"正在计算 {len(self.query_set)} 个查询的真实值 (k={k}, exclude_query_ids={exclude_query_ids})...")
-        print(f"Computing ground truth for {len(self.query_set)} queries against {len(self.dataset)} data points")
         start_time = time.time()
         
         ground_truth = {}
@@ -593,15 +592,13 @@ class KMeansHNSWEvaluator:
             ground_truth[query_id] = distances[:k]
             
             if (i + 1) % 10 == 0:
-                print(f"  已处理 {i + 1}/{len(self.query_set)} 个查询 (Processed {i + 1}/{len(self.query_set)} queries)")
+                print(f"  已处理 {i + 1}/{len(self.query_set)} 个查询")
         
         elapsed = time.time() - start_time
         if exclude_query_ids and excluded_count == 0:
             print(f"警告：exclude_query_ids=True但没有排除任何数据点。查询向量可能不在数据集中。")
-            print(f"   Warning: exclude_query_ids=True but no data points were excluded. Query vectors may not be in dataset.")
         
         print(f"真实值计算完成，耗时 {elapsed:.2f}秒，排除了 {excluded_count} 个数据点")
-        print(f"Ground truth computed in {elapsed:.2f}s, excluded {excluded_count} data points")
         
         self._ground_truth_cache[cache_key] = ground_truth
         return ground_truth
@@ -633,7 +630,7 @@ class KMeansHNSWEvaluator:
         if ground_truth is None:
             ground_truth = self.compute_ground_truth(k, exclude_query_ids)
         
-        print(f"正在评估 {len(self.query_set)} 个查询的召回率 (k={k}, n_probe={n_probe})... (Evaluating recall)")
+        print(f"正在评估 {len(self.query_set)} 个查询的召回率 (k={k}, n_probe={n_probe})...")
         start_time = time.time()
         
         total_correct = 0
@@ -896,7 +893,7 @@ class KMeansHNSWEvaluator:
         if max_combinations and len(combinations) > max_combinations:
             print(f"限制测试 {max_combinations} 个组合，总共 {len(combinations)} 个")
             combinations = random.sample(combinations, max_combinations)
-        print(f"📋 将测试 {len(combinations)} 个参数组合")
+        print(f"将测试 {len(combinations)} 个参数组合")
 
         results: List[Dict[str, Any]] = []
         k_values = evaluation_params.get('k_values', [10])
@@ -1104,7 +1101,7 @@ class KMeansHNSWEvaluator:
         
         if results:
             overall_best = max(results, key=lambda x: x.get('best_recall', 0))
-            print(f"🥇 全局最佳召回率: {overall_best.get('best_recall', 0):.4f}")
+            print(f"全局最佳召回率: {overall_best.get('best_recall', 0):.4f}")
             print(f"最佳参数组合: {overall_best.get('parameters', {})}")
         
         print(f"================================================================")
@@ -1273,14 +1270,12 @@ def load_sift_data():
 
         print(f"已加载SIFT数据: {base_vectors.shape[0]} 个基础向量, "
               f"{query_vectors.shape[0]} 个查询向量, 维度 {base_vectors.shape[1]}")
-        print(f"Loaded SIFT data: {base_vectors.shape[0]} base vectors, "
-              f"{query_vectors.shape[0]} query vectors, dimension {base_vectors.shape[1]}")
 
         return base_vectors, query_vectors
     
     except Exception as e:
-        print(f"加载SIFT数据时出错: {e} (Error loading SIFT data)")
-        print("改用合成数据... (Using synthetic data instead)")
+        print(f"加载SIFT数据时出错: {e}")
+        print("改用合成数据...")
         return None, None
 
 
@@ -1331,7 +1326,6 @@ if __name__ == "__main__":
     print("K-Means HNSW + Multi-Pivot参数调优和评估系统")
     print(f"请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
     print(f"Multi-Pivot启用状态: {args.enable_multi_pivot}")
-    print(f"   Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
     
     # 尝试加载SIFT数据，失败则使用合成数据 (Try to load SIFT data, fall back to synthetic unless disabled)
     base_vectors, query_vectors = (None, None)
@@ -1340,7 +1334,7 @@ if __name__ == "__main__":
     
     if base_vectors is None:
         # 创建合成数据 (Create synthetic data)
-        print("🎲 创建合成数据集... (Creating synthetic dataset)")
+        print("创建合成数据集...")
         base_vectors = np.random.randn(max(args.dataset_size, 10000), args.dimension).astype(np.float32)
         query_vectors = np.random.randn(max(args.query_size, 100), args.dimension).astype(np.float32)
     
@@ -1350,14 +1344,13 @@ if __name__ == "__main__":
     if len(query_vectors) > args.query_size:
         query_vectors = query_vectors[:args.query_size]
     print(f"使用基础向量: {len(base_vectors)} | 查询: {len(query_vectors)} | 维度: {base_vectors.shape[1]}")
-    print(f"   Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
     query_ids = list(range(len(query_vectors)))
     
     # 距离函数 (Distance function)
     distance_func = lambda x, y: np.linalg.norm(x - y)
     
     # 构建基础HNSW索引 (Build base HNSW index)
-    print("🏗️  构建基础HNSW索引... (Building base HNSW index)")
+    print("构建基础HNSW索引...")
     # 基线 HNSW ef 固定为 200（用户指定逻辑）
     base_index = HNSW(distance_func=distance_func, m=16, ef_construction=200)
     
