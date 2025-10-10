@@ -266,7 +266,7 @@ class KMeansHNSWMultiPivotEvaluator:
         total_expected = len(self.query_set) * k
         individual_recalls = []
         
-        print(f"🔍 评估HNSW基线性能 (k={k}, ef={ef})...")
+        print(f"评估HNSW基线性能 (k={k}, ef={ef})...")
         
         for query_vector, query_id in zip(self.query_set, self.query_ids):
             true_neighbors = {node_id for _, node_id in ground_truth[query_id]}
@@ -563,7 +563,7 @@ class KMeansHNSWMultiPivotEvaluator:
                                 phase_records.append({**h_eval, 'k': k})
                                 print(f"  [Hybrid(Level)] k={k} n_probe={n_probe} recall={h_eval['recall_at_k']:.4f} avg_time={h_eval['avg_query_time_ms']:.2f}ms")
                     except Exception as he:
-                        print(f"  ⚠️ Hybrid HNSW 构建或评估失败: {he}")
+                        print(f"  Hybrid HNSW 构建或评估失败: {he}")
 
                 # Phase 4: Single-pivot KMeans-HNSW hybrid
                 for k in k_values:
@@ -610,7 +610,7 @@ class KMeansHNSWMultiPivotEvaluator:
                                 phase_records.append({**mp_eval, 'k': k})
                                 print(f"  [K-Means HNSW多枢纽] k={k} n_probe={n_probe} recall={mp_eval['recall_at_k']:.4f} avg_time={mp_eval['avg_query_time_ms']:.2f}ms")
                     except Exception as me:
-                        print(f"  ⚠️ Multi-Pivot KMeans HNSW 构建或评估失败: {me}")
+                        print(f"  Multi-Pivot KMeans HNSW 构建或评估失败: {me}")
 
                 combination_results = {
                     'parameters': params,
@@ -623,10 +623,10 @@ class KMeansHNSWMultiPivotEvaluator:
                 print(f"  此组合最佳召回率: {best_recall:.4f}")
                 
             except Exception as e:
-                print(f"❌ 参数组合 {params} 出错: {e}")
+                print(f"参数组合 {params} 出错: {e}")
                 continue
 
-        print(f"\n🎯 参数扫描完成！测试了 {len(results)} 个组合")
+        print(f"\n参数扫描完成！测试了 {len(results)} 个组合")
         print(f"    包含Multi-Pivot评估: {multi_pivot_config.get('enabled', False)}")
         return results
 
@@ -757,9 +757,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("🔬 K-Means HNSW + Multi-Pivot参数调优和评估系统")
-    print(f"📊 请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
-    print(f"🎯 Multi-Pivot启用状态: {args.enable_multi_pivot}")
-    print(f"🚀 优化版本启用: {args.use_optimized} {'(减少重复K-Means聚类计算)' if args.use_optimized else ''}")
+    print(f"请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
+    print(f"Multi-Pivot启用状态: {args.enable_multi_pivot}")
+    print(f"优化版本启用: {args.use_optimized} {'(减少重复K-Means聚类计算)' if args.use_optimized else ''}")
     
     # 如果启用优化版本，使用优化的评估器
     if args.use_optimized:

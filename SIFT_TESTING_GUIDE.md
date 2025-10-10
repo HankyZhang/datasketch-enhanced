@@ -59,7 +59,7 @@ The SIFT1M dataset is a standard benchmark in the similarity search community:
 ### Sample Output
 
 ```
-🚀 SIFT Benchmark - SMALL Dataset
+SIFT Benchmark - SMALL Dataset
 ==================================================
 
 Dataset: 5000 vectors, 128 dimensions

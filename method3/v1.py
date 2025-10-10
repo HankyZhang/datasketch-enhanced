@@ -441,7 +441,7 @@ class KMeansHNSWMultiPivot:
                         self.child_vectors[node_id] = node_vector
                         assignment_counts[node_id] = assignment_counts.get(node_id, 0) + 1
             except Exception as e:
-                print(f"    ⚠️ Failed to repair node {node_id}: {e}")
+                print(f"    Failed to repair node {node_id}: {e}")
                 continue
         
         final_assigned = set(assignment_counts.keys())
@@ -597,7 +597,7 @@ class KMeansHNSWEvaluator:
         
         elapsed = time.time() - start_time
         if exclude_query_ids and excluded_count == 0:
-            print(f"⚠️  警告：exclude_query_ids=True但没有排除任何数据点。查询向量可能不在数据集中。")
+            print(f"警告：exclude_query_ids=True但没有排除任何数据点。查询向量可能不在数据集中。")
             print(f"   Warning: exclude_query_ids=True but no data points were excluded. Query vectors may not be in dataset.")
         
         print(f"真实值计算完成，耗时 {elapsed:.2f}秒，排除了 {excluded_count} 个数据点")
@@ -768,7 +768,7 @@ class KMeansHNSWEvaluator:
         total_expected = len(self.query_set) * k
         individual_recalls = []
         
-        print(f"🔍 评估HNSW基线性能 (k={k}, ef={ef})...")
+        print(f"评估HNSW基线性能 (k={k}, ef={ef})...")
         
         for query_vector, query_id in zip(self.query_set, self.query_ids):
             # Ground truth format: {query_id: [(distance, node_id), ...]}
@@ -884,9 +884,9 @@ class KMeansHNSWEvaluator:
                 'pivot_overquery_factor': 1.2
             }
 
-        print("🔬================== 五方法对比评估系统 ==================")
-        print("📊 评估流程: HNSW → K-Means → Hybrid HNSW → KMeans HNSW → Multi-Pivot KMeans HNSW")
-        print(f"🎯 Multi-Pivot启用状态: {multi_pivot_config.get('enabled', False)}")
+        print("================== 五方法对比评估系统 ==================")
+        print("评估流程: HNSW → K-Means → Hybrid HNSW → KMeans HNSW → Multi-Pivot KMeans HNSW")
+        print(f"Multi-Pivot启用状态: {multi_pivot_config.get('enabled', False)}")
         print("================================================================")
 
         # ========== 步骤1: 准备参数组合 ==========
@@ -905,13 +905,13 @@ class KMeansHNSWEvaluator:
         enable_hybrid = evaluation_params.get('enable_hybrid', True)
 
         # ========== 步骤2: 预计算真实值 (Ground Truth) ==========
-        print(f"\n🎯 步骤2: 预计算真实值 (k_values: {k_values})")
+        print(f"\n步骤2: 预计算真实值 (k_values: {k_values})")
         ground_truths: Dict[int, Dict] = {}
         for k in k_values:
             ground_truths[k] = self.compute_ground_truth(k, exclude_query_ids=False)
         
         # ========== 步骤3: 预训练共享K-Means模型 ==========
-        print(f"\n🤖 步骤3: 预训练共享K-Means模型以避免重复计算")
+        print(f"\n步骤3: 预训练共享K-Means模型以避免重复计算")
         shared_dataset_vectors = []
         for node_id, node in base_index._nodes.items():
             if node.point is not None:
@@ -934,16 +934,16 @@ class KMeansHNSWEvaluator:
             )
             kmeans_model.fit(shared_dataset_vectors)
             shared_kmeans_models[n_clusters] = kmeans_model
-            print(f"     ✅ 完成: {actual_clusters} clusters, inertia={kmeans_model.inertia_:.2f}")
+            print(f"     完成: {actual_clusters} clusters, inertia={kmeans_model.inertia_:.2f}")
         
-        print(f"✅ 共享K-Means模型预训练完成 ({len(shared_kmeans_models)} 个模型)")
-        print(f"💡 K-Means模型将被所有方法重用，确保公平对比")
+        print(f"共享K-Means模型预训练完成 ({len(shared_kmeans_models)} 个模型)")
+        print(f"K-Means模型将被所有方法重用，确保公平对比")
 
         # ========== 步骤4: 开始参数组合评估 ==========
         for i, combination in enumerate(combinations):
-            print(f"\n🔬 =========== 参数组合 {i + 1}/{len(combinations)} ===========")
+            print(f"\n=========== 参数组合 {i + 1}/{len(combinations)} ===========")
             params = dict(zip(param_names, combination))
-            print(f"📝 当前参数: {params}")
+            print(f"当前参数: {params}")
 
             try:
                 phase_records: List[Dict[str, Any]] = []
@@ -951,19 +951,19 @@ class KMeansHNSWEvaluator:
                 # 获取当前组合的共享K-Means模型
                 current_n_clusters = params['n_clusters']
                 shared_model = shared_kmeans_models[current_n_clusters]
-                print(f"🤖 使用预训练的K-Means模型 (n_clusters={current_n_clusters})")
+                print(f"使用预训练的K-Means模型 (n_clusters={current_n_clusters})")
                 
                 # ========== 方法1: HNSW基线 ==========
-                print(f"\n📊 方法1: HNSW基线评估")
+                print(f"\n方法1: HNSW基线评估")
                 base_ef = base_index._ef_construction
                 print(f"   参数: ef={base_ef}")
                 for k in k_values:
                     b_eval = self.evaluate_hnsw_baseline(base_index, k, base_ef, ground_truths[k])
                     phase_records.append({**b_eval, 'k': k})
-                    print(f"   ✅ k={k}: recall={b_eval['recall_at_k']:.4f}, 时间={b_eval['avg_query_time_ms']:.2f}ms")
+                    print(f"   k={k}: recall={b_eval['recall_at_k']:.4f}, 时间={b_eval['avg_query_time_ms']:.2f}ms")
 
                 # ========== 方法2: 纯K-Means聚类 ==========
-                print(f"\n📊 方法2: 纯K-Means聚类评估")
+                print(f"\n方法2: 纯K-Means聚类评估")
                 print(f"   参数: n_clusters={current_n_clusters}, n_probe={n_probe_values}")
                 for k in k_values:
                     for n_probe in n_probe_values:
@@ -973,11 +973,11 @@ class KMeansHNSWEvaluator:
                         )
                         c_eval['phase'] = 'clusters_only'
                         phase_records.append({**c_eval, 'k': k})
-                        print(f"   ✅ k={k} n_probe={n_probe}: recall={c_eval['recall_at_k']:.4f}, 时间={c_eval['avg_query_time_ms']:.2f}ms")
+                        print(f"   k={k} n_probe={n_probe}: recall={c_eval['recall_at_k']:.4f}, 时间={c_eval['avg_query_time_ms']:.2f}ms")
 
                 # ========== 方法3: Hybrid HNSW ==========
                 if enable_hybrid:
-                    print(f"\n📊 方法3: Hybrid HNSW评估")
+                    print(f"\n方法3: Hybrid HNSW评估")
                     print(f"   参数: parent_level={hybrid_parent_level}, k_children={params['k_children']}")
                     try:
                         hybrid_build_start = time.time()
@@ -1007,12 +1007,12 @@ class KMeansHNSWEvaluator:
                                 h_eval['hybrid_build_time'] = hybrid_build_time
                                 h_eval['hybrid_k_children'] = hybrid_stats.get('k_children', params['k_children'])
                                 phase_records.append({**h_eval, 'k': k})
-                                print(f"   ✅ k={k} n_probe={n_probe}: recall={h_eval['recall_at_k']:.4f}, 时间={h_eval['avg_query_time_ms']:.2f}ms")
+                                print(f"   k={k} n_probe={n_probe}: recall={h_eval['recall_at_k']:.4f}, 时间={h_eval['avg_query_time_ms']:.2f}ms")
                     except Exception as he:
-                        print(f"   ❌ Hybrid HNSW 评估失败: {he}")
+                        print(f"   Hybrid HNSW 评估失败: {he}")
 
                 # ========== 方法4: KMeans HNSW (单枢纽) ==========
-                print(f"\n📊 方法4: KMeans HNSW (单枢纽)评估")
+                print(f"\n方法4: KMeans HNSW (单枢纽)评估")
                 print(f"   参数: n_clusters={current_n_clusters}, k_children={params['k_children']}")
                 
                 construction_start = time.time()
@@ -1036,14 +1036,14 @@ class KMeansHNSWEvaluator:
                     for n_probe in n_probe_values:
                         eval_result = self.evaluate_recall(kmeans_hnsw, k, n_probe, ground_truths[k])
                         phase_records.append({**eval_result, 'phase': 'kmeans_hnsw_single_pivot'})
-                        print(f"   ✅ k={k} n_probe={n_probe}: recall={eval_result['recall_at_k']:.4f}, 时间={eval_result['avg_query_time_ms']:.2f}ms")
+                        print(f"   k={k} n_probe={n_probe}: recall={eval_result['recall_at_k']:.4f}, 时间={eval_result['avg_query_time_ms']:.2f}ms")
 
 
 
 
                 # ========== 方法5: Multi-Pivot KMeans HNSW ==========
                 if multi_pivot_config.get('enabled', False):
-                    print(f"\n📊 方法5: Multi-Pivot KMeans HNSW评估")
+                    print(f"\n方法5: Multi-Pivot KMeans HNSW评估")
                     print(f"   参数: pivots={multi_pivot_config.get('num_pivots', 3)}, "
                           f"strategy={multi_pivot_config.get('pivot_selection_strategy', 'line_perp_third')}")
                     try:
@@ -1070,14 +1070,14 @@ class KMeansHNSWEvaluator:
                             for n_probe in n_probe_values:
                                 mp_eval_result = self.evaluate_multi_pivot_recall(multi_pivot_hnsw, k, n_probe, ground_truths[k])
                                 phase_records.append({**mp_eval_result, 'phase': 'kmeans_hnsw_multi_pivot', 'multi_pivot_build_time': multi_pivot_build_time})
-                                print(f"   ✅ k={k} n_probe={n_probe}: recall={mp_eval_result['recall_at_k']:.4f}, 时间={mp_eval_result['avg_query_time_ms']:.2f}ms")
+                                print(f"   k={k} n_probe={n_probe}: recall={mp_eval_result['recall_at_k']:.4f}, 时间={mp_eval_result['avg_query_time_ms']:.2f}ms")
                     
                     except Exception as mp_e:
-                        print(f"   ❌ Multi-Pivot KMeans HNSW 评估失败: {mp_e}")
+                        print(f"   Multi-Pivot KMeans HNSW 评估失败: {mp_e}")
                         traceback.print_exc()
 
                 # ========== 组合总结 ==========
-                print(f"\n📈 参数组合 {i + 1} 评估完成!")
+                print(f"\n参数组合 {i + 1} 评估完成!")
                 best_recall = max(r['recall_at_k'] for r in phase_records if 'recall_at_k' in r)
                 methods_tested = len(set(r.get('phase', r.get('method', 'unknown')) for r in phase_records))
                 print(f"   测试了 {methods_tested} 种方法，最佳召回率: {best_recall:.4f}")
@@ -1093,19 +1093,19 @@ class KMeansHNSWEvaluator:
                 results.append(combination_results)
                 
             except Exception as e:
-                print(f"❌ 参数组合 {params} 评估出错: {e}")
+                print(f"参数组合 {params} 评估出错: {e}")
                 traceback.print_exc()
                 continue
 
         # ========== 最终总结 ==========
         print(f"\n� ================== 五方法对比评估完成 ==================")
-        print(f"📊 总计测试: {len(results)} 个参数组合")
-        print(f"🎯 Multi-Pivot启用: {multi_pivot_config.get('enabled', False)}")
+        print(f"总计测试: {len(results)} 个参数组合")
+        print(f"Multi-Pivot启用: {multi_pivot_config.get('enabled', False)}")
         
         if results:
             overall_best = max(results, key=lambda x: x.get('best_recall', 0))
             print(f"🥇 全局最佳召回率: {overall_best.get('best_recall', 0):.4f}")
-            print(f"🔧 最佳参数组合: {overall_best.get('parameters', {})}")
+            print(f"最佳参数组合: {overall_best.get('parameters', {})}")
         
         print(f"================================================================")
         return results
@@ -1328,9 +1328,9 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    print("🔬 K-Means HNSW + Multi-Pivot参数调优和评估系统")
-    print(f"📊 请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
-    print(f"🎯 Multi-Pivot启用状态: {args.enable_multi_pivot}")
+    print("K-Means HNSW + Multi-Pivot参数调优和评估系统")
+    print(f"请求的数据集大小: {args.dataset_size}, 查询大小: {args.query_size}")
+    print(f"Multi-Pivot启用状态: {args.enable_multi_pivot}")
     print(f"   Requested dataset size: {args.dataset_size}, query size: {args.query_size}")
     
     # 尝试加载SIFT数据，失败则使用合成数据 (Try to load SIFT data, fall back to synthetic unless disabled)
@@ -1349,7 +1349,7 @@ if __name__ == "__main__":
         base_vectors = base_vectors[:args.dataset_size]
     if len(query_vectors) > args.query_size:
         query_vectors = query_vectors[:args.query_size]
-    print(f"📈 使用基础向量: {len(base_vectors)} | 查询: {len(query_vectors)} | 维度: {base_vectors.shape[1]}")
+    print(f"使用基础向量: {len(base_vectors)} | 查询: {len(query_vectors)} | 维度: {base_vectors.shape[1]}")
     print(f"   Using base vectors: {len(base_vectors)} | queries: {len(query_vectors)} | dim: {base_vectors.shape[1]}")
     query_ids = list(range(len(query_vectors)))
     
@@ -1382,13 +1382,13 @@ if __name__ == "__main__":
 
     param_grid = {
         'n_clusters': cluster_options,
-        'k_children': [200],
-        'child_search_ef': [300]
+        'k_children': [1000, 2000],
+        # 'child_search_ef': [300]
     }
     
     evaluation_params = {
         'k_values': [10],
-    'n_probe_values': [5, 10, 20],
+    'n_probe_values': [1,3, 5, 10, 20],
     'hybrid_parent_level': args.hybrid_parent_level,
     'enable_hybrid': (not args.no_hybrid)
     }
@@ -1396,7 +1396,7 @@ if __name__ == "__main__":
     # Perform parameter sweep
     print("\nStarting parameter sweep...")
     # Limit combinations to keep runtime sane on large sets
-    max_combos = 9 if len(cluster_options) > 1 else None
+    max_combos = 30 if len(cluster_options) > 1 else None
     
     # 准备自适应配置 (Prepare adaptive configuration)
     adaptive_config = {
@@ -1431,7 +1431,7 @@ if __name__ == "__main__":
         demo_result = sweep_results[0]
         demo_params = demo_result['parameters']
         print(f"\nUsing first parameter combination for demonstration: {demo_params}")
-        print("\n🎯 Parameter sweep completed! All comparisons are available in sweep_results.")
+        print("\nParameter sweep completed! All comparisons are available in sweep_results.")
 
         # Save results
         results = {
@@ -1457,15 +1457,15 @@ if __name__ == "__main__":
         }
         save_results(results, 'method3_tuning_results.json')
         
-    print(f"\n✅ Multi-Pivot parameter tuning completed!")
+    print(f"\nMulti-Pivot parameter tuning completed!")
     if args.enable_multi_pivot:
-        print("🎯 Five-method comparison results saved:")
+        print("  Five-method comparison results saved:")
         print("   1. HNSW基线 (HNSW Baseline)")
         print("   2. 纯K-Means (Pure K-Means)")
         print("   3. Hybrid HNSW")  
         print("   4. KMeans HNSW (单枢纽)")
         print("   5. Multi-Pivot KMeans HNSW (多枢纽)")
     else:
-        print("💡 提示: 使用 --enable-multi-pivot 启用Multi-Pivot方案的对比评估")
+        print("提示: 使用 --enable-multi-pivot 启用Multi-Pivot方案的对比评估")
     
     print("Results saved to method3_tuning_results.json")

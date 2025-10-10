@@ -54,7 +54,7 @@ setup(
         'Programming Language :: Python :: 3.11',
     ],
     keywords='hnsw similarity-search machine-learning chinese-docs',
-    packages=find_packages(include=['hnsw*', 'hybrid_hnsw*', 'optimized_hnsw*']),
+    packages=find_packages(include=['hnsw*', 'hybrid_hnsw*']),
     install_requires=[
         'numpy>=1.11',
         'scikit-learn>=0.24',  # Added for MiniBatchKMeans in method3

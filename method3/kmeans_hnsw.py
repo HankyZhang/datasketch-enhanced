@@ -50,7 +50,6 @@ class KMeansHNSW:
         include_centroids_in_results: bool = False,
         diversify_max_assignments: Optional[int] = None,
         repair_min_assignments: Optional[int] = None,
-        overlap_sample: int = 50,
         # --- Adaptive k_children controls ---
         adaptive_k_children: bool = False,
         k_children_scale: float = 1.5,
@@ -73,7 +72,6 @@ class KMeansHNSW:
             include_centroids_in_results: Whether to include centroids in search results
             diversify_max_assignments: Maximum assignments per child for diversification
             repair_min_assignments: Minimum assignments per child for repair
-            overlap_sample: Sample size for overlap statistics
             adaptive_k_children: If True, override provided k_children using dataset stats
             k_children_scale: Multiplier applied to average cluster size when adaptive_k_children
             k_children_min: Minimum k_children when adaptive
@@ -117,7 +115,6 @@ class KMeansHNSW:
         self.include_centroids_in_results = include_centroids_in_results
         self.diversify_max_assignments = diversify_max_assignments
         self.repair_min_assignments = repair_min_assignments
-        self.overlap_sample = overlap_sample
         
         # Shared clustering support
         self.shared_kmeans_model = shared_kmeans_model
@@ -154,7 +151,6 @@ class KMeansHNSW:
         }
         self.search_times = []
         self.candidate_sizes = []
-        self._overlap_stats = {}
 
         # Build the system
         self._build_kmeans_hnsw_system()
@@ -542,43 +538,6 @@ class KMeansHNSW:
         
         return results
     
-    def update_search_params(
-        self, 
-        n_clusters: Optional[int] = None,
-        k_children: Optional[int] = None,
-        child_search_ef: Optional[int] = None,
-        rebuild: bool = False
-    ):
-        """
-        Update search parameters and optionally rebuild the system.
-        
-        Args:
-            n_clusters: New number of clusters
-            k_children: New number of children per cluster
-            child_search_ef: New search width for child finding
-            rebuild: Whether to rebuild the system with new parameters
-        """
-        old_params = {
-            'n_clusters': self.n_clusters,
-            'k_children': self.k_children,
-            'child_search_ef': self.child_search_ef
-        }
-        
-        if n_clusters is not None:
-            self.n_clusters = n_clusters
-        if k_children is not None:
-            self.k_children = k_children
-        if child_search_ef is not None:
-            self.child_search_ef = child_search_ef
-        
-        print(f"Updated parameters: {old_params} -> "
-              f"{{'n_clusters': {self.n_clusters}, 'k_children': {self.k_children}, "
-              f"'child_search_ef': {self.child_search_ef}}}")
-        
-        if rebuild:
-            print("Rebuilding K-Means HNSW system with new parameters...")
-            self._build_kmeans_hnsw_system()
-
     def _update_child_stats(self):
         """Internal helper to recompute child-related statistics."""
         self.stats['num_children'] = len(self.child_vectors)
@@ -587,120 +546,35 @@ class KMeansHNSW:
         )
     
     def get_stats(self) -> Dict:
-        """Get comprehensive statistics about the system."""
+        """Get basic statistics about the system."""
         # Always refresh dynamic counts before returning
         self._update_child_stats()
         stats = self.stats.copy()
-        stats.update(self._overlap_stats)
 
         # Add K-Means specific stats
         if self._cluster_info:
             stats.update({
                 'kmeans_inertia': self._cluster_info.get('inertia'),
-                'kmeans_iterations': self._cluster_info.get('n_iterations'),
-                'cluster_size_stats': {
-                    'avg': self._cluster_info.get('avg_cluster_size'),
-                    'std': self._cluster_info.get('std_cluster_size'),
-                    'min': self._cluster_info.get('min_cluster_size'),
-                    'max': self._cluster_info.get('max_cluster_size')
-                }
+                'kmeans_iterations': self._cluster_info.get('n_iterations')
             })
 
         return stats
     
-    def get_centroid_info(self) -> Dict:
-        """Get detailed information about centroids and mappings."""
-        return {
-            'centroid_child_map': self.parent_child_map,
-            'num_clusters': self.n_clusters,
-            'num_children': len(self.child_vectors),
-            'k_children': self.k_children,
-            'centroids_shape': self.centroids.shape if self.centroids is not None else None,
-            'centroid_ids': self.centroid_ids
-        }
-    
     def _compute_mapping_diagnostics(self):
-        """Compute coverage and overlap statistics for the mapping."""
+        """Compute basic coverage statistics for the mapping."""
         if not self.parent_child_map:
             self.stats['coverage_fraction'] = 0.0
             return
         
-        all_children_sets = [set(children) for children in self.parent_child_map.values() if children]
-        if not all_children_sets:
-            self.stats['coverage_fraction'] = 0.0
-            return
+        # Count unique children across all centroids
+        all_children = set()
+        for children in self.parent_child_map.values():
+            all_children.update(children)
         
-        # Coverage computation
-        union_all = set().union(*all_children_sets)
+        # Calculate coverage fraction
         total_base_nodes = len(self.base_index)
-        coverage_fraction = len(union_all) / total_base_nodes if total_base_nodes > 0 else 0.0
+        coverage_fraction = len(all_children) / total_base_nodes if total_base_nodes > 0 else 0.0
         self.stats['coverage_fraction'] = coverage_fraction
-        
-        # Sample pairwise overlaps for efficiency
-        overlaps = []
-        if len(all_children_sets) > 1:
-            import random
-            sample_pairs = min(self.overlap_sample, len(all_children_sets) * (len(all_children_sets) - 1) // 2)
-            sampled_indices = random.sample(range(len(all_children_sets)), min(len(all_children_sets), 2 * int(np.sqrt(sample_pairs))))
-            
-            for i in range(len(sampled_indices)):
-                for j in range(i + 1, len(sampled_indices)):
-                    set_i = all_children_sets[sampled_indices[i]]
-                    set_j = all_children_sets[sampled_indices[j]]
-                    if set_i and set_j:  # Avoid empty sets
-                        jaccard = len(set_i & set_j) / len(set_i | set_j)
-                        overlaps.append(jaccard)
-        
-        if overlaps:
-            self._overlap_stats = {
-                'avg_jaccard_overlap': float(np.mean(overlaps)),
-                'std_jaccard_overlap': float(np.std(overlaps)),
-                'max_jaccard_overlap': float(np.max(overlaps)),
-                'overlap_samples': len(overlaps)
-            }
-        else:
-            self._overlap_stats = {
-                'avg_jaccard_overlap': 0.0,
-                'std_jaccard_overlap': 0.0,
-                'max_jaccard_overlap': 0.0,
-                'overlap_samples': 0
-            }
-
-    # -------------------- Public Maintenance / Repair API --------------------
-    def run_repair(self, min_assignments: int, verbose: bool = True) -> Dict[str, float]:
-        """Force a repair phase after construction or parameter updates.
-
-        This can be used even if diversification was not originally enabled.
-        It ensures every base index node is assigned to at least `min_assignments` centroids.
-
-        Args:
-            min_assignments: Minimum centroid assignments per data node
-            verbose: Print progress
-
-        Returns:
-            Dictionary with coverage statistics after repair.
-        """
-        if not self.parent_child_map:
-            raise RuntimeError("Parent-child map is empty; build the system first.")
-
-        from collections import defaultdict as _dd
-        assignment_counts = _dd(int)
-        for centroid_id, children in self.parent_child_map.items():
-            for child in children:
-                assignment_counts[child] += 1
-
-        # Set property so internal method uses this threshold
-        self.repair_min_assignments = min_assignments
-        if verbose:
-            print(f"Running manual repair to guarantee >= {min_assignments} assignments per node...")
-        self._repair_child_assignments(assignment_counts)
-        self._compute_mapping_diagnostics()
-        # Ensure stats reflect any added nodes
-        self._update_child_stats()
-        return {
-            'coverage_fraction': self.stats.get('coverage_fraction', 0.0),
-            'avg_children_per_centroid': self.stats.get('avg_children_per_centroid', 0.0)
-        }
 
 
 def create_synthetic_dataset(n_vectors: int, dim: int, seed: int = 42) -> np.ndarray:
